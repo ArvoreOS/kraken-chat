@@ -58,6 +58,7 @@ public class MainActivity extends Activity {
         ContextCompat.startForegroundService(this, serviceIntent);
 
         waitForServerAndLoad();
+        UpdateChecker.checkForUpdate(this);
     }
 
     private void waitForServerAndLoad() {
