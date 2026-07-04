@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kraken</title>
+<meta name="theme-color" content="#ffffff">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/static/icons/kraken.png">
+<link rel="apple-touch-icon" href="/static/icons/kraken.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="name-screen" class="screen">
+  <div class="logo-big">
+    <img src="/static/icons/icon-512.png" width="120" height="120" alt="Kraken">
+  </div>
+  <h1><span class="roxo">Kraken</span></h1>
+  <p class="subtitle">Chat offline em malha — sem internet, sem servidor central.</p>
+  <input id="name-input" maxlength="24" placeholder="Como quer ser chamado?">
+  <button id="name-submit" class="btn verde">Entrar na conversa</button>
+</div>
+
+<div id="chat-screen" class="screen hidden">
+  <header class="topbar">
+    <div class="brand">
+      <img src="/static/icons/kraken.png" width="30" height="30" alt="Kraken">
+      <span class="brand-text"><b class="roxo">Kraken</b></span>
+    </div>
+    <div class="status" id="status">
+      <span class="dot" id="status-dot"></span>
+      <span id="status-text">conectando…</span>
+    </div>
+    <a href="/join" target="_blank" class="btn roxo small">+ Convidar</a>
+  </header>
+
+  <main id="messages"></main>
+
+  <form id="send-form" class="composer">
+    <label class="attach-btn amarelo" for="file-input">📎</label>
+    <input type="file" id="file-input" hidden>
+    <input type="text" id="text-input" placeholder="Escreva uma mensagem…" autocomplete="off">
+    <button type="submit" class="btn verde send-btn">Enviar</button>
+  </form>
+</div>
+
+<script src="/static/socket.io.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

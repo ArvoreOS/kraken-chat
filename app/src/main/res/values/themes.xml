@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.Kraken" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/kraken_white</item>
+        <item name="android:windowBackground">@color/kraken_white</item>
+    </style>
+</resources>

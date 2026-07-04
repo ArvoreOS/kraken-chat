@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <rect width="100" height="100" fill="#ffffff"/>
+  <!-- tentaculos -->
+  <path d="M20,55 C10,65 14,80 8,92" fill="none" stroke="#00A651" stroke-width="7" stroke-linecap="round"/>
+  <path d="M33,60 C28,72 34,82 28,94" fill="none" stroke="#00A651" stroke-width="7" stroke-linecap="round"/>
+  <path d="M50,62 C50,74 50,84 50,96" fill="none" stroke="#00A651" stroke-width="7" stroke-linecap="round"/>
+  <path d="M67,60 C72,72 66,82 72,94" fill="none" stroke="#00A651" stroke-width="7" stroke-linecap="round"/>
+  <path d="M80,55 C90,65 86,80 92,92" fill="none" stroke="#00A651" stroke-width="7" stroke-linecap="round"/>
+  <!-- cabeca -->
+  <ellipse cx="50" cy="40" rx="32" ry="28" fill="#7B2CBF" stroke="#00A651" stroke-width="3"/>
+  <!-- olhos -->
+  <circle cx="37" cy="36" r="7" fill="#E6B800"/>
+  <circle cx="63" cy="36" r="7" fill="#E6B800"/>
+  <circle cx="37" cy="36" r="2.6" fill="#2b0a45"/>
+  <circle cx="63" cy="36" r="2.6" fill="#2b0a45"/>
+</svg>
