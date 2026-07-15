@@ -387,6 +387,18 @@ class Store:
         row = conn.execute("SELECT has_file FROM messages WHERE id=?", (msg_id,)).fetchone()
         return bool(row and row["has_file"])
 
+    def list_missing_files(self, limit=50):
+        """Mensagens de arquivo/áudio cuja mensagem (metadado) já chegou,
+        mas cujos bytes ainda não - candidatas a tentar buscar de novo com
+        qualquer peer disponível, não só o que entregou a mensagem primeiro."""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE kind IN ('file','audio') AND has_file=0 "
+            "ORDER BY ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ---------- identidade de outros nós ----------
     def remember_node(self, node_id, pubkey_b64, name=""):
         if not node_id or not pubkey_b64:
@@ -518,6 +530,29 @@ class MeshNode:
         threading.Thread(target=self._gossip_server, daemon=True).start()
         threading.Thread(target=self._sync_loop, daemon=True).start()
         threading.Thread(target=self._prune_loop, daemon=True).start()
+        threading.Thread(target=self._retry_missing_files_loop, daemon=True).start()
+
+    # ---------- arquivos que ainda não chegaram ----------
+    def _retry_missing_files_loop(self):
+        """A primeira tentativa de buscar um arquivo/áudio só usa o peer que
+        entregou a mensagem primeiro - se for um relay que não tem os bytes
+        (ex: o nó-semente), o arquivo nunca chega, mesmo que outro peer
+        alcançável agora tenha ele completo. Isso tenta de novo com todos os
+        peers vivos periodicamente até conseguir."""
+        while True:
+            time.sleep(20)
+            faltando = store.list_missing_files()
+            if not faltando:
+                continue
+            peers = list(self.live_peers().items())
+            for msg in faltando:
+                local_path = FILES_DIR / f"{msg['id']}_{msg['file_name']}"
+                if local_path.exists():
+                    continue
+                for _peer_id, info in peers:
+                    self._fetch_file_http(info, msg, local_path)
+                    if local_path.exists():
+                        break
 
     # ---------- descoberta ----------
     def _discovery_broadcast(self):
