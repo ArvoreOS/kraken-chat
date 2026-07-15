@@ -11,6 +11,15 @@
   const textInput = document.getElementById("text-input");
   const fileInput = document.getElementById("file-input");
   const recordBtn = document.getElementById("record-btn");
+  const recordBar = document.getElementById("record-bar");
+  const recordWave = document.getElementById("record-wave");
+  const recordTimer = document.getElementById("record-timer");
+  const recordCancelBtn = document.getElementById("record-cancel");
+  const recordStopBtn = document.getElementById("record-stop");
+  const previewBar = document.getElementById("preview-bar");
+  const previewAudio = document.getElementById("preview-audio");
+  const previewCancelBtn = document.getElementById("preview-cancel");
+  const previewSendBtn = document.getElementById("preview-send");
   const statusDot = document.getElementById("status-dot");
   const statusText = document.getElementById("status-text");
   const tabsEl = document.getElementById("tabs");
@@ -244,6 +253,10 @@
     if (matchesConv(msg)) paintMessage(msg);
   }
 
+  function isImageName(name) {
+    return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name || "");
+  }
+
   function paintMessage(msg) {
     if (messagesEl.querySelector(`[data-id="${msg.id}"]`)) return;
     const mine = msg.sender_id === senderId();
@@ -264,6 +277,25 @@
       audio.controls = true;
       audio.src = "/files/" + msg.id + "/view";
       body.appendChild(audio);
+    } else if (msg.kind === "file" && isImageName(msg.file_name)) {
+      const a = document.createElement("a");
+      a.href = "/files/" + msg.id + "/view";
+      a.target = "_blank";
+      a.className = "file-link";
+      const img = document.createElement("img");
+      img.className = "msg-image";
+      img.src = "/files/" + msg.id + "/view";
+      img.alt = msg.file_name || "imagem";
+      img.loading = "lazy";
+      img.onerror = () => {
+        // Arquivo ainda não chegou nesse nó (ex: peer de origem só
+        // alcançável na rede local dele, não pela internet) - cai pra
+        // link em vez de deixar o ícone de imagem quebrada.
+        img.remove();
+        a.textContent = "📎 " + (msg.file_name || "imagem") + " (ainda não disponível aqui)";
+      };
+      a.appendChild(img);
+      body.appendChild(a);
     } else if (msg.kind === "file") {
       const a = document.createElement("a");
       a.href = "/files/" + msg.id + "/view";
@@ -315,13 +347,15 @@
 
   function connectSocket() {
     const socket = io();
+    // O texto de status é sempre controlado por pollPeers (contagem de nós
+    // na malha) - aqui só controla a cor do ponto, pra evitar os dois
+    // ficarem brigando pra escrever em statusText.textContent ao mesmo
+    // tempo (bug visto: piscava "offline" mesmo com a malha ativa).
     socket.on("connect", () => {
       statusDot.classList.add("online");
-      statusText.textContent = "conectado";
     });
     socket.on("disconnect", () => {
       statusDot.classList.remove("online");
-      statusText.textContent = "offline";
     });
     socket.on("new_message", (msg) => {
       addMessage(msg);
@@ -398,33 +432,115 @@
     fileInput.value = "";
   });
 
-  // ---------- gravação de áudio ----------
+  // ---------- gravação de áudio (com onda sonora ao vivo + prévia) ----------
   let mediaRecorder = null;
   let recordedChunks = [];
+  let pendingAudioBlob = null;
+  let discardNextRecording = false;
+  let audioCtx = null;
+  let waveRAF = null;
+  let recordTimerInterval = null;
+  let recordStartTs = 0;
 
-  recordBtn.addEventListener("click", async () => {
-    if (mediaRecorder && mediaRecorder.state === "recording") {
-      mediaRecorder.stop();
-      return;
-    }
+  function startWaveform(stream) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    const ctx = recordWave.getContext("2d");
+    const data = new Uint8Array(analyser.frequencyBinCount);
+
+    recordStartTs = Date.now();
+    recordTimerInterval = setInterval(() => {
+      const s = Math.floor((Date.now() - recordStartTs) / 1000);
+      recordTimer.textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+    }, 250);
+
+    const draw = () => {
+      waveRAF = requestAnimationFrame(draw);
+      analyser.getByteFrequencyData(data);
+      ctx.clearRect(0, 0, recordWave.width, recordWave.height);
+      const barW = recordWave.width / data.length;
+      for (let i = 0; i < data.length; i++) {
+        const h = (data[i] / 255) * recordWave.height;
+        ctx.fillStyle = "#00A651";
+        ctx.fillRect(i * barW, recordWave.height - h, Math.max(barW - 1, 1), h);
+      }
+    };
+    draw();
+  }
+
+  function stopWaveform() {
+    if (waveRAF) cancelAnimationFrame(waveRAF);
+    if (recordTimerInterval) clearInterval(recordTimerInterval);
+    if (audioCtx) audioCtx.close();
+    waveRAF = null;
+    recordTimerInterval = null;
+    audioCtx = null;
+    recordTimer.textContent = "0:00";
+  }
+
+  async function startRecording() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       recordedChunks = [];
+      discardNextRecording = false;
       mediaRecorder = new MediaRecorder(stream);
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) recordedChunks.push(e.data);
       };
-      mediaRecorder.onstop = async () => {
+      mediaRecorder.onstop = () => {
         stream.getTracks().forEach((t) => t.stop());
+        stopWaveform();
         recordBtn.classList.remove("recording");
-        const blob = new Blob(recordedChunks, { type: "audio/webm" });
-        await uploadBlob(blob, "audio", "audio.webm");
+        recordBar.classList.add("hidden");
+        if (discardNextRecording) {
+          discardNextRecording = false;
+          return;
+        }
+        pendingAudioBlob = new Blob(recordedChunks, { type: "audio/webm" });
+        previewAudio.src = URL.createObjectURL(pendingAudioBlob);
+        previewBar.classList.remove("hidden");
       };
       mediaRecorder.start();
       recordBtn.classList.add("recording");
+      recordBar.classList.remove("hidden");
+      startWaveform(stream);
     } catch (e) {
       alert("não foi possível acessar o microfone");
     }
+  }
+
+  recordBtn.addEventListener("click", () => {
+    if (mediaRecorder && mediaRecorder.state === "recording") return;
+    startRecording();
+  });
+
+  recordStopBtn.addEventListener("click", () => {
+    if (mediaRecorder && mediaRecorder.state === "recording") mediaRecorder.stop();
+  });
+
+  recordCancelBtn.addEventListener("click", () => {
+    if (mediaRecorder && mediaRecorder.state === "recording") {
+      discardNextRecording = true;
+      mediaRecorder.stop();
+    }
+  });
+
+  previewCancelBtn.addEventListener("click", () => {
+    pendingAudioBlob = null;
+    previewAudio.src = "";
+    previewBar.classList.add("hidden");
+  });
+
+  previewSendBtn.addEventListener("click", async () => {
+    if (!pendingAudioBlob) return;
+    const blob = pendingAudioBlob;
+    pendingAudioBlob = null;
+    previewAudio.src = "";
+    previewBar.classList.add("hidden");
+    await uploadBlob(blob, "audio", "audio.webm");
   });
 
   // ---------- inicialização ----------

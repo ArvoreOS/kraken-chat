@@ -1,4 +1,4 @@
-const CACHE = "kraken-v2";
+const CACHE = "kraken-v3";
 const SHELL = [
   "/",
   "/static/style.css",
@@ -27,7 +27,17 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/socket.io/")) {
     return; // sempre rede, nunca cache (dados em tempo real)
   }
+  // Rede primeiro, cache só como fallback pra quando estiver offline - o
+  // Kraken muda com frequência (o servidor é sempre localhost, custo de
+  // rede é zero), então cache-primeiro deixava gente presa em telas
+  // antigas até bumpar o nome do CACHE manualmente a cada deploy.
   event.respondWith(
-    caches.match(event.request).then((cached) => cached || fetch(event.request))
+    fetch(event.request)
+      .then((resp) => {
+        const copy = resp.clone();
+        caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+        return resp;
+      })
+      .catch(() => caches.match(event.request))
   );
 });

@@ -176,6 +176,14 @@ body {
   height: 34px;
 }
 
+.msg-image {
+  max-width: 220px;
+  max-height: 280px;
+  border-radius: 12px;
+  display: block;
+  object-fit: cover;
+}
+
 .msg .locked {
   font-style: italic;
   opacity: .7;
@@ -208,6 +216,32 @@ body {
   animation: pulse 1s infinite;
   color: #d33;
 }
+
+.record-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--borda);
+  background: #fff8f8;
+}
+.record-bar#preview-bar { background: #f5fff8; }
+.record-bar canvas { flex: 1; height: 36px; background: #fff0f0; border-radius: 8px; }
+.record-bar #record-timer { font-size: 13px; color: #a33; min-width: 38px; }
+.record-bar audio { flex: 1; height: 36px; }
+.record-icon-btn {
+  border: none;
+  background: #eee;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  font-size: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.record-icon-btn.stop { background: var(--roxo); color: #fff; }
+.record-icon-btn.send { background: var(--verde); color: #fff; }
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: .4; }

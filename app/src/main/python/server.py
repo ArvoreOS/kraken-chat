@@ -590,7 +590,7 @@ class MeshNode:
             # qualquer coisa - precisamos saber quem é o peer pra poder
             # decifrar mensagens diretas endereçadas a ele/dele mais tarde.
             peer_hello = self._recv_json(conn)
-            self._send_json(conn, {"node_id": self.node_id, "pubkey": _my_pubkey_b64(), "name": self.display_name})
+            self._send_json(conn, {"node_id": self.node_id, "pubkey": _my_pubkey_b64(), "name": self.display_name, "http_port": HTTP_PORT})
             if isinstance(peer_hello, dict):
                 peer_key = peer_hello.get("node_id") or peer_key
                 store.remember_node(peer_hello.get("node_id"), peer_hello.get("pubkey"), peer_hello.get("name", ""))
@@ -632,10 +632,15 @@ class MeshNode:
             conn = socket.create_connection((info["ip"], info["port"]), timeout=5)
             conn.settimeout(10)
 
-            self._send_json(conn, {"node_id": self.node_id, "pubkey": _my_pubkey_b64(), "name": self.display_name})
+            self._send_json(conn, {"node_id": self.node_id, "pubkey": _my_pubkey_b64(), "name": self.display_name, "http_port": HTTP_PORT})
             peer_hello = self._recv_json(conn)
             if isinstance(peer_hello, dict):
                 store.remember_node(peer_hello.get("node_id"), peer_hello.get("pubkey"), peer_hello.get("name", ""))
+                # A porta HTTP do peer pode ser diferente da nossa (ex: o
+                # nó-semente do Oracle usa 7000) - sem isso, buscar o arquivo
+                # depois tenta na porta errada e a imagem/áudio nunca chega.
+                if peer_hello.get("http_port"):
+                    info = dict(info, http_port=peer_hello["http_port"])
 
             my_ids = store.all_ids()
             self._send_json(conn, list(my_ids))
@@ -668,7 +673,8 @@ class MeshNode:
 
     def _fetch_file_http(self, peer_info, msg, local_path):
         import urllib.request
-        url = f"http://{peer_info['ip']}:{HTTP_PORT}/files/{msg['id']}"
+        port = peer_info.get("http_port") or HTTP_PORT
+        url = f"http://{peer_info['ip']}:{port}/files/{msg['id']}"
         try:
             with urllib.request.urlopen(url, timeout=15) as resp, open(local_path, "wb") as f:
                 f.write(resp.read())
@@ -1140,11 +1146,40 @@ def start_server():
 def _abrir_navegador_desktop():
     """Só roda quando o server.py é executado direto (Termux/desktop/.exe
     empacotado) - o KrakenService no Android chama start_server() sem
-    passar por aqui, então o WebView continua sendo quem abre a tela lá."""
+    passar por aqui, então o WebView continua sendo quem abre a tela lá.
+
+    Tenta abrir como janela de app de verdade (Chrome/Edge --app=, sem
+    barra de endereço nem abas) em vez de uma aba comum do navegador
+    padrão. Se não achar Chrome/Edge instalado, cai pro navegador normal."""
+    import shutil
+    import subprocess
     import webbrowser
+
     time.sleep(1.5)
+    url = f"http://127.0.0.1:{HTTP_PORT}/"
+
+    candidatos = []
+    for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(env_var)
+        if not base:
+            continue
+        candidatos.append(str(Path(base) / "Google/Chrome/Application/chrome.exe"))
+        candidatos.append(str(Path(base) / "Microsoft/Edge/Application/msedge.exe"))
+    for nome in ("chrome", "google-chrome", "chromium", "msedge"):
+        achado = shutil.which(nome)
+        if achado:
+            candidatos.append(achado)
+
+    for exe in candidatos:
+        if exe and Path(exe).exists():
+            try:
+                subprocess.Popen([exe, f"--app={url}", "--window-size=420,760"])
+                return
+            except OSError:
+                continue
+
     try:
-        webbrowser.open(f"http://127.0.0.1:{HTTP_PORT}/")
+        webbrowser.open(url)
     except Exception:
         pass
 

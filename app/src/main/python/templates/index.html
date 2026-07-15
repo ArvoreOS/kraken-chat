@@ -40,6 +40,19 @@
 
   <main id="messages"></main>
 
+  <div id="record-bar" class="record-bar hidden">
+    <button type="button" id="record-cancel" class="record-icon-btn" title="Cancelar">✕</button>
+    <canvas id="record-wave" width="240" height="36"></canvas>
+    <span id="record-timer">0:00</span>
+    <button type="button" id="record-stop" class="record-icon-btn stop" title="Parar">⏹</button>
+  </div>
+
+  <div id="preview-bar" class="record-bar hidden">
+    <button type="button" id="preview-cancel" class="record-icon-btn" title="Descartar">🗑️</button>
+    <audio id="preview-audio" controls></audio>
+    <button type="button" id="preview-send" class="record-icon-btn send" title="Enviar áudio">➤</button>
+  </div>
+
   <form id="send-form" class="composer">
     <label class="attach-btn amarelo" for="file-input">📎</label>
     <input type="file" id="file-input" hidden>
