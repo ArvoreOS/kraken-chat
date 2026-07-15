@@ -42,6 +42,12 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setAllowFileAccess(true);
+        // O servidor é sempre localhost e muda a cada atualização do app -
+        // cache de HTTP aqui só serve pra mostrar tela antiga depois de
+        // atualizar (visto em WebView de MIUI/Xiaomi). Sem custo real
+        // desabilitar, é tudo loopback.
+        settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        webView.clearCache(true);
 
         webView.setWebChromeClient(new WebChromeClient() {
             @Override

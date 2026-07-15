@@ -663,6 +663,16 @@ app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024  # 64MB por arquivo
 socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
 
+@app.after_request
+def _no_cache(response):
+    # Este servidor só existe em localhost e muda a cada atualização do
+    # app - cache de HTTP aqui só serve pra mostrar tela antiga depois de
+    # atualizar (visto em WebView de MIUI/Xiaomi). Sem custo real
+    # desabilitar, é tudo loopback.
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return response
+
+
 def broadcast_new_message(msg):
     socketio.emit("new_message", msg)
 
