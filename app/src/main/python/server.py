@@ -50,13 +50,25 @@ DB_PATH = DATA_DIR / "craque.db"
 NODE_ID_PATH = DATA_DIR / "node_id.txt"
 NODE_KEY_PATH = DATA_DIR / "node_key.bin"
 
-HTTP_PORT = 5000
-DISCOVERY_PORT = 8891
-GOSSIP_PORT = 8892
+# Configuráveis por variável de ambiente só pra rodar em servidor fixo
+# (nó-semente na internet) - no Android/Chaquopy essas variáveis nunca
+# existem, então o comportamento continua exatamente o mesmo.
+HTTP_PORT = int(os.environ.get("KRAKEN_HTTP_PORT", 5000))
+DISCOVERY_PORT = int(os.environ.get("KRAKEN_DISCOVERY_PORT", 8891))
+GOSSIP_PORT = int(os.environ.get("KRAKEN_GOSSIP_PORT", 8892))
 DISCOVERY_INTERVAL = 3
 PEER_TIMEOUT = 15
 SYNC_INTERVAL = 10
 MAX_SYNC_IDS = 3000
+
+# Nó-semente sempre online (Oceano Livre, Oracle) - ponte híbrida: quem tem
+# internet sincroniza com ele além da malha local, o que costura qualquer
+# nó online com qualquer outro nó online no mundo, sem NAT/porta aberta em
+# casa (a conexão é sempre feita DAQUI pra lá). Quem não tem internet
+# continua funcionando só na malha local, do jeito que já era.
+# O próprio servidor rodando no Oracle sobe com KRAKEN_BOOTSTRAP_PEERS=""
+# pra não tentar ser semente de si mesmo.
+BOOTSTRAP_PEERS_RAW = os.environ.get("KRAKEN_BOOTSTRAP_PEERS", "136.248.100.20:8892")
 
 try:
     # No Termux/desktop, BASE_DIR/data é sempre gravável. No Android/Chaquopy,
@@ -447,12 +459,28 @@ class MeshNode:
     def __init__(self, node_id, on_new_message):
         self.node_id = node_id
         self.on_new_message = on_new_message
-        self.peers = {}  # node_id -> {ip, port, last_seen, name}
+        self.peers = {}  # node_id -> {ip, port, last_seen, name} (descoberta local, some com o tempo)
+        self.bootstrap_peers = {}  # sempre tentados, nunca expiram - ver BOOTSTRAP_PEERS_RAW
         self.lock = threading.Lock()
         self.display_name = "Nó " + node_id[:4]
         # Só pra diagnóstico (tela /debug) - não afeta o funcionamento da malha.
         self.sync_log = {}      # peer_id -> {last_attempt, ok, error, last_success}
         self.incoming_log = {}  # peer_id_ou_ip -> {last_attempt, ok, error}
+
+    def _seed_bootstrap_peers(self):
+        for entry in BOOTSTRAP_PEERS_RAW.split(","):
+            entry = entry.strip()
+            if not entry or ":" not in entry:
+                continue
+            ip, _, port_s = entry.rpartition(":")
+            try:
+                port = int(port_s)
+            except ValueError:
+                continue
+            pid = f"bootstrap-{ip}-{port}"
+            self.bootstrap_peers[pid] = {
+                "ip": ip, "port": port, "name": "Oceano Livre (semente)", "last_seen": time.time(),
+            }
 
     def _record_sync(self, peer_id, attempt_ts, ok, error=None):
         with self.lock:
@@ -473,6 +501,7 @@ class MeshNode:
                 entry["last_success"] = attempt_ts
 
     def start(self):
+        self._seed_bootstrap_peers()
         threading.Thread(target=self._discovery_broadcast, daemon=True).start()
         threading.Thread(target=self._discovery_listen, daemon=True).start()
         threading.Thread(target=self._gossip_server, daemon=True).start()
@@ -523,7 +552,9 @@ class MeshNode:
 
     def live_peers(self):
         with self.lock:
-            return dict(self.peers)
+            merged = dict(self.bootstrap_peers)
+            merged.update(self.peers)
+            return merged
 
     # ---------- gossip (servidor) ----------
     def _gossip_server(self):
