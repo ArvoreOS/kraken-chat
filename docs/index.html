@@ -60,6 +60,7 @@
   .tagline{color:var(--dim);font-size:16px;max-width:480px;margin:0 auto 26px;line-height:1.5}
 
   .cta-row{display:flex;flex-direction:column;align-items:center;gap:14px;margin-bottom:10px}
+  .cta-buttons{display:flex;flex-wrap:wrap;justify-content:center;gap:12px}
   a.btn-download{
     display:inline-flex;align-items:center;gap:10px;
     background:linear-gradient(135deg,var(--verde),#00c463);
@@ -68,6 +69,11 @@
     box-shadow:0 12px 26px -8px rgba(0,166,81,.55);
   }
   a.btn-download:hover{filter:brightness(1.06)}
+  a.btn-download.pc{
+    background:linear-gradient(135deg,#c9a3f7,var(--roxo));
+    color:#fff;
+    box-shadow:0 12px 26px -8px rgba(123,44,191,.55);
+  }
   .apk-note{font-size:12px;color:var(--dim)}
 
   .qr-box{
@@ -122,9 +128,14 @@
     </p>
 
     <div class="cta-row">
-      <a class="btn-download" href="https://github.com/ArvoreOS/kraken-chat/releases/latest/download/app-debug.apk">
-        📲 Baixar Kraken (Android)
-      </a>
+      <div class="cta-buttons">
+        <a class="btn-download" href="https://github.com/ArvoreOS/kraken-chat/releases/latest/download/app-debug.apk">
+          📲 Baixar Kraken (Android)
+        </a>
+        <a class="btn-download pc" href="https://github.com/ArvoreOS/kraken-chat/releases/latest/download/Kraken.exe">
+          🖥️ Baixar Kraken (Windows)
+        </a>
+      </div>
       <span class="apk-note">Sempre baixa a versão mais recente automaticamente</span>
     </div>
 
