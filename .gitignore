@@ -5,3 +5,4 @@ local.properties
 .idea/
 app/build/
 app/src/main/python/data/
+app/src/main/python/__pycache__/

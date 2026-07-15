@@ -32,17 +32,25 @@
       <span class="dot" id="status-dot"></span>
       <span id="status-text">conectando…</span>
     </div>
+    <a href="/debug" class="btn amarelo small" title="Diagnóstico">🩺</a>
     <a href="/join" target="_blank" class="btn roxo small">+ Convidar</a>
   </header>
+
+  <nav id="tabs" class="tabs"></nav>
 
   <main id="messages"></main>
 
   <form id="send-form" class="composer">
     <label class="attach-btn amarelo" for="file-input">📎</label>
     <input type="file" id="file-input" hidden>
+    <button type="button" id="record-btn" class="attach-btn roxo" title="Gravar áudio">🎙️</button>
     <input type="text" id="text-input" placeholder="Escreva uma mensagem…" autocomplete="off">
     <button type="submit" class="btn verde send-btn">Enviar</button>
   </form>
+</div>
+
+<div id="modal-overlay" class="modal-overlay hidden">
+  <div class="modal" id="modal-content"></div>
 </div>
 
 <script src="/static/socket.io.min.js"></script>

@@ -7,11 +7,26 @@ na mesma rede local (WiFi comum, hotspot ou Wi-Fi Direct pareado
 manualmente - para o sistema operacional todos são só "uma rede IP local").
 
 Quando dois nós se encontram na mesma rede, eles trocam automaticamente
-todas as mensagens que um tem e o outro não (gossip/anti-entropia). Isso
-faz a rede funcionar mesmo que os dois nunca estejam online ao mesmo
-tempo: a informação vai "pegando carona" de aparelho em aparelho conforme
-as pessoas circulam entre diferentes redes/hotspots do sítio.
+todas as mensagens que um tem e o outro não (gossip/anti-entropia), cifradas
+ou não conforme o escopo (ver abaixo). Isso faz a rede funcionar mesmo que
+os dois nunca estejam online ao mesmo tempo: a informação vai "pegando
+carona" de aparelho em aparelho conforme as pessoas circulam entre
+diferentes redes/hotspots do sítio.
+
+Escopo das mensagens:
+- "global": vai pra rede toda, texto puro (igual sempre foi).
+- "direct": mensagem de um nó pra outro, cifrada com a chave pública do
+  destinatário (X25519/NaCl Box) - só ele consegue ler.
+- "group" + grupo "private": cifrada com a chave simétrica do grupo (NaCl
+  SecretBox) - só quem tem a chave (os membros) lê.
+- "group" + grupo "open": texto puro, só organizado numa aba separada.
+
+Todo nó continua repassando (gossip) TODAS as mensagens pra todo peer que
+encontrar, cifradas ou não - é isso que faz a malha tolerante a atraso
+funcionar (um nó "de fora" carrega a mensagem até ela chegar no destino
+certo). Quem não tem a chave nunca consegue decifrar o conteúdo.
 """
+import base64
 import json
 import mimetypes
 import os
@@ -22,7 +37,10 @@ import time
 import uuid
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_file, send_from_directory, abort
+import nacl.public
+import nacl.secret
+import nacl.utils
+from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 from flask_socketio import SocketIO
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -30,6 +48,7 @@ DATA_DIR = BASE_DIR / "data"
 FILES_DIR = DATA_DIR / "files"
 DB_PATH = DATA_DIR / "craque.db"
 NODE_ID_PATH = DATA_DIR / "node_id.txt"
+NODE_KEY_PATH = DATA_DIR / "node_key.bin"
 
 HTTP_PORT = 5000
 DISCOVERY_PORT = 8891
@@ -55,6 +74,14 @@ def get_node_id():
     node_id = uuid.uuid4().hex[:12]
     NODE_ID_PATH.write_text(node_id)
     return node_id
+
+
+def _load_or_create_node_key():
+    if NODE_KEY_PATH.exists():
+        return nacl.public.PrivateKey(NODE_KEY_PATH.read_bytes())
+    key = nacl.public.PrivateKey.generate()
+    NODE_KEY_PATH.write_bytes(bytes(key))
+    return key
 
 
 _ANDROID_IP_OVERRIDE = None
@@ -89,10 +116,116 @@ try:
 except OSError:
     NODE_ID = uuid.uuid4().hex[:12]  # reatribuído em configure_data_dir() no Android
 
+try:
+    NODE_PRIVKEY = _load_or_create_node_key()
+except OSError:
+    NODE_PRIVKEY = nacl.public.PrivateKey.generate()  # reatribuído em configure_data_dir() no Android
+NODE_PUBKEY = NODE_PRIVKEY.public_key
+
+
+def _my_pubkey_b64():
+    return base64.b64encode(bytes(NODE_PUBKEY)).decode()
+
+
+# ---------------- criptografia por escopo ----------------
+# "store" é definido mais abaixo (classe Store); estas funções só o usam
+# dentro do corpo (chamado em tempo de execução), então a ordem de
+# definição no arquivo não importa.
+
+def _encrypt_direct_bytes(plaintext, recipient_pubkey_bytes):
+    box = nacl.public.Box(NODE_PRIVKEY, nacl.public.PublicKey(recipient_pubkey_bytes))
+    return bytes(box.encrypt(plaintext))
+
+
+def _decrypt_direct_bytes(ciphertext, peer_pubkey_bytes):
+    try:
+        box = nacl.public.Box(NODE_PRIVKEY, nacl.public.PublicKey(peer_pubkey_bytes))
+        return box.decrypt(ciphertext)
+    except Exception:
+        return None
+
+
+def _encrypt_group_bytes(plaintext, group_key):
+    return bytes(nacl.secret.SecretBox(group_key).encrypt(plaintext))
+
+
+def _decrypt_group_bytes(ciphertext, group_key):
+    try:
+        return nacl.secret.SecretBox(group_key).decrypt(ciphertext)
+    except Exception:
+        return None
+
+
+def _encrypt_for_scope(data, scope, group_id=None, recipient_id=None):
+    """Retorna (bytes_a_guardar, encrypted_bool). Lança ValueError se a
+    cifragem for necessária mas faltar a chave/peer pra fazer isso."""
+    if scope == "direct":
+        if not recipient_id:
+            raise ValueError("destinatário não informado")
+        pubkey_b64 = store.get_pubkey(recipient_id)
+        if not pubkey_b64:
+            raise ValueError("ainda não vi esse nó na rede, não dá pra mandar direto")
+        return _encrypt_direct_bytes(data, base64.b64decode(pubkey_b64)), True
+    if scope == "group":
+        group = store.get_group(group_id)
+        if not group:
+            raise ValueError("grupo desconhecido")
+        if group["kind"] == "private":
+            return _encrypt_group_bytes(data, group["key"]), True
+        return data, False
+    return data, False
+
+
+def _decrypt_for_scope(data, row):
+    """row: dict de uma linha de messages. Retorna bytes decifrados, ou
+    None se este nó não tem como (não é membro/destinatário)."""
+    scope = row.get("scope") or "global"
+    if scope == "direct":
+        # Usa origin_node_id (identidade criptográfica do aparelho que criou
+        # a mensagem), não sender_id (apelido de exibição escolhido na hora
+        # de entrar no chat) - são coisas diferentes, e comparar com sender_id
+        # faz até o próprio remetente perder acesso ao que ele mesmo mandou.
+        origin_node_id, recipient_id = row.get("origin_node_id"), row.get("recipient_id")
+        if NODE_ID not in (origin_node_id, recipient_id):
+            return None
+        peer_id = recipient_id if origin_node_id == NODE_ID else origin_node_id
+        pubkey_b64 = store.get_pubkey(peer_id)
+        if not pubkey_b64:
+            return None
+        return _decrypt_direct_bytes(data, base64.b64decode(pubkey_b64))
+    if scope == "group":
+        group = store.get_group(row.get("group_id"))
+        if not group or not group.get("key"):
+            return None
+        return _decrypt_group_bytes(data, group["key"])
+    return data
+
+
+def _try_decrypt_message(row):
+    """Usado só na hora de mostrar mensagens de texto pro dono deste nó
+    (histórico / evento em tempo real) - nunca no armazenamento nem no
+    repasse entre nós, que continuam sempre com o texto cifrado."""
+    if not row.get("encrypted") or row.get("kind") != "text":
+        return row
+    out = dict(row)
+    plain = None
+    try:
+        ciphertext = base64.b64decode(row["text"]) if row.get("text") else b""
+        plain = _decrypt_for_scope(ciphertext, row)
+    except Exception:
+        plain = None
+    if plain is None:
+        out["text"] = None
+        out["hidden"] = True
+    else:
+        out["text"] = plain.decode("utf-8", errors="replace")
+    return out
+
 
 class Store:
-    """Guarda mensagens localmente (SQLite) - é o que permite sincronizar
-    depois, mesmo com o remetente e destinatário nunca estando juntos."""
+    """Guarda mensagens, grupos e identidades de outros nós localmente
+    (SQLite) - é o que permite sincronizar depois, mesmo com o remetente e
+    destinatário nunca estando juntos."""
 
     def __init__(self, path):
         self.path = str(path)
@@ -101,12 +234,23 @@ class Store:
 
     def _conn(self):
         if not hasattr(self._local, "conn"):
-            self._local.conn = sqlite3.connect(self.path, check_same_thread=False)
+            self._local.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=10)
             self._local.conn.row_factory = sqlite3.Row
+            self._local.conn.execute("PRAGMA busy_timeout=10000")
+            self._local.conn.execute("PRAGMA journal_mode=WAL")
         return self._local.conn
 
     def _init_schema(self):
-        conn = sqlite3.connect(self.path)
+        # WAL + busy_timeout: com vários gossips e requisições HTTP escrevendo
+        # ao mesmo tempo (uma conexão SQLite por thread), o modo padrão do
+        # SQLite derruba a escrita perdedora com "database is locked" - e como
+        # sqlite3.OperationalError não é OSError/ValueError/ConnectionError,
+        # esse erro nem era capturado no except do gossip, matando a thread
+        # de sincronização no meio da troca. WAL deixa leituras e escritas
+        # conviverem, e o busy_timeout faz esperar a vez em vez de falhar.
+        conn = sqlite3.connect(self.path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
@@ -117,7 +261,48 @@ class Store:
                 text TEXT,
                 file_name TEXT,
                 file_size INTEGER,
-                has_file INTEGER DEFAULT 0
+                has_file INTEGER DEFAULT 0,
+                scope TEXT DEFAULT 'global',
+                group_id TEXT,
+                recipient_id TEXT,
+                encrypted INTEGER DEFAULT 0,
+                origin_node_id TEXT
+            )
+        """)
+        # Migração pra bancos criados antes do motor de escopo existir.
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        for col, decl in (
+            ("scope", "TEXT DEFAULT 'global'"),
+            ("group_id", "TEXT"),
+            ("recipient_id", "TEXT"),
+            ("encrypted", "INTEGER DEFAULT 0"),
+            ("origin_node_id", "TEXT"),
+        ):
+            if col not in existing_cols:
+                conn.execute(f"ALTER TABLE messages ADD COLUMN {col} {decl}")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS known_nodes (
+                node_id TEXT PRIMARY KEY,
+                pubkey TEXT,
+                name TEXT,
+                last_seen REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS groups (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                kind TEXT,
+                key BLOB,
+                created_ts REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_members (
+                group_id TEXT,
+                node_id TEXT,
+                joined_ts REAL,
+                PRIMARY KEY (group_id, node_id)
             )
         """)
         conn.commit()
@@ -128,12 +313,16 @@ class Store:
         try:
             conn.execute(
                 "INSERT INTO messages (id, sender_id, sender_name, ts, kind, text, "
-                "file_name, file_size, has_file) VALUES (?,?,?,?,?,?,?,?,?)",
+                "file_name, file_size, has_file, scope, group_id, recipient_id, encrypted, "
+                "origin_node_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     msg["id"], msg["sender_id"], msg["sender_name"], msg["ts"],
                     msg["kind"], msg.get("text"), msg.get("file_name"),
                     msg.get("file_size"),
-                    1 if (has_file if has_file is not None else msg.get("kind") == "text") else 0,
+                    1 if (has_file if has_file is not None else msg.get("kind") not in ("file", "audio")) else 0,
+                    msg.get("scope") or "global", msg.get("group_id"), msg.get("recipient_id"),
+                    1 if msg.get("encrypted") else 0,
+                    msg.get("origin_node_id"),
                 ),
             )
             conn.commit()
@@ -175,6 +364,78 @@ class Store:
         row = conn.execute("SELECT has_file FROM messages WHERE id=?", (msg_id,)).fetchone()
         return bool(row and row["has_file"])
 
+    # ---------- identidade de outros nós ----------
+    def remember_node(self, node_id, pubkey_b64, name=""):
+        if not node_id or not pubkey_b64:
+            return
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO known_nodes (node_id, pubkey, name, last_seen) VALUES (?,?,?,?) "
+            "ON CONFLICT(node_id) DO UPDATE SET pubkey=excluded.pubkey, "
+            "name=excluded.name, last_seen=excluded.last_seen",
+            (node_id, pubkey_b64, name, time.time()),
+        )
+        conn.commit()
+
+    def get_pubkey(self, node_id):
+        conn = self._conn()
+        row = conn.execute("SELECT pubkey FROM known_nodes WHERE node_id=?", (node_id,)).fetchone()
+        return row["pubkey"] if row else None
+
+    def list_known_nodes(self):
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT node_id, name, last_seen FROM known_nodes ORDER BY last_seen DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---------- grupos ----------
+    def create_group(self, group_id, name, kind, key):
+        conn = self._conn()
+        conn.execute(
+            "INSERT OR IGNORE INTO groups (id, name, kind, key, created_ts) VALUES (?,?,?,?,?)",
+            (group_id, name, kind, key, time.time()),
+        )
+        conn.commit()
+
+    def get_group(self, group_id):
+        if not group_id:
+            return None
+        conn = self._conn()
+        row = conn.execute("SELECT * FROM groups WHERE id=?", (group_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_group_public(self, group_id):
+        group = self.get_group(group_id)
+        if not group:
+            return None
+        return {"id": group["id"], "name": group["name"], "kind": group["kind"]}
+
+    def list_groups(self):
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT g.id, g.name, g.kind FROM groups g "
+            "JOIN group_members m ON m.group_id = g.id AND m.node_id = ? "
+            "ORDER BY g.created_ts DESC",
+            (NODE_ID,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_member(self, group_id, node_id):
+        conn = self._conn()
+        conn.execute(
+            "INSERT OR IGNORE INTO group_members (group_id, node_id, joined_ts) VALUES (?,?,?)",
+            (group_id, node_id, time.time()),
+        )
+        conn.commit()
+
+    def list_members(self, group_id):
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT node_id FROM group_members WHERE group_id=?", (group_id,)
+        ).fetchall()
+        return [r["node_id"] for r in rows]
+
 
 store = Store(DB_PATH)
 
@@ -189,6 +450,27 @@ class MeshNode:
         self.peers = {}  # node_id -> {ip, port, last_seen, name}
         self.lock = threading.Lock()
         self.display_name = "Nó " + node_id[:4]
+        # Só pra diagnóstico (tela /debug) - não afeta o funcionamento da malha.
+        self.sync_log = {}      # peer_id -> {last_attempt, ok, error, last_success}
+        self.incoming_log = {}  # peer_id_ou_ip -> {last_attempt, ok, error}
+
+    def _record_sync(self, peer_id, attempt_ts, ok, error=None):
+        with self.lock:
+            entry = self.sync_log.setdefault(peer_id, {})
+            entry["last_attempt"] = attempt_ts
+            entry["ok"] = ok
+            entry["error"] = error
+            if ok:
+                entry["last_success"] = attempt_ts
+
+    def _record_incoming(self, peer_id, attempt_ts, ok, error=None):
+        with self.lock:
+            entry = self.incoming_log.setdefault(peer_id, {})
+            entry["last_attempt"] = attempt_ts
+            entry["ok"] = ok
+            entry["error"] = error
+            if ok:
+                entry["last_success"] = attempt_ts
 
     def start(self):
         threading.Thread(target=self._discovery_broadcast, daemon=True).start()
@@ -254,8 +536,23 @@ class MeshNode:
             threading.Thread(target=self._handle_gossip_conn, args=(conn,), daemon=True).start()
 
     def _handle_gossip_conn(self, conn):
+        attempt_ts = time.time()
+        try:
+            peer_key = conn.getpeername()[0]
+        except OSError:
+            peer_key = "?"
         try:
             conn.settimeout(10)
+
+            # Handshake de identidade: troca node_id+chave pública antes de
+            # qualquer coisa - precisamos saber quem é o peer pra poder
+            # decifrar mensagens diretas endereçadas a ele/dele mais tarde.
+            peer_hello = self._recv_json(conn)
+            self._send_json(conn, {"node_id": self.node_id, "pubkey": _my_pubkey_b64(), "name": self.display_name})
+            if isinstance(peer_hello, dict):
+                peer_key = peer_hello.get("node_id") or peer_key
+                store.remember_node(peer_hello.get("node_id"), peer_hello.get("pubkey"), peer_hello.get("name", ""))
+
             their_ids = set(self._recv_json(conn))
             my_ids = store.all_ids()
             missing_for_them = list(my_ids - their_ids)
@@ -266,8 +563,9 @@ class MeshNode:
             new_msgs = self._recv_json(conn)
             for msg in new_msgs:
                 self._ingest_message(msg, conn_for_file=conn)
-        except (OSError, ValueError, ConnectionError):
-            pass
+            self._record_incoming(peer_key, attempt_ts, ok=True)
+        except (OSError, ValueError, ConnectionError, KeyError, sqlite3.Error) as e:
+            self._record_incoming(peer_key, attempt_ts, ok=False, error=f"{type(e).__name__}: {e}")
         finally:
             conn.close()
 
@@ -287,26 +585,38 @@ class MeshNode:
             ).start()
 
     def _sync_with_peer(self, peer_id, info):
+        attempt_ts = time.time()
         try:
             conn = socket.create_connection((info["ip"], info["port"]), timeout=5)
             conn.settimeout(10)
+
+            self._send_json(conn, {"node_id": self.node_id, "pubkey": _my_pubkey_b64(), "name": self.display_name})
+            peer_hello = self._recv_json(conn)
+            if isinstance(peer_hello, dict):
+                store.remember_node(peer_hello.get("node_id"), peer_hello.get("pubkey"), peer_hello.get("name", ""))
+
             my_ids = store.all_ids()
             self._send_json(conn, list(my_ids))
             missing_for_me = self._recv_json(conn)
             for msg in missing_for_me:
                 self._ingest_message(msg, conn_for_file=None, fetch_from=info)
 
-            their_ids = set(self._recv_json(conn))
+            # Precisa mandar antes de receber aqui - o servidor (_handle_gossip_conn)
+            # está bloqueado esperando este recv_json antes de mandar their_ids;
+            # inverter a ordem trava os dois lados até o timeout e a mensagem nova
+            # nunca chega no peer (bug: "envia mas ninguém recebe").
             self._send_json(conn, list(my_ids))
+            their_ids = set(self._recv_json(conn))
             missing_for_them_ids = my_ids - their_ids
             self._send_json(conn, store.get_messages(list(missing_for_them_ids)))
             conn.close()
-        except (OSError, ValueError, ConnectionError):
-            pass
+            self._record_sync(peer_id, attempt_ts, ok=True)
+        except (OSError, ValueError, ConnectionError, KeyError, sqlite3.Error) as e:
+            self._record_sync(peer_id, attempt_ts, ok=False, error=f"{type(e).__name__}: {e}")
 
     def _ingest_message(self, msg, conn_for_file=None, fetch_from=None):
-        is_new = store.add_message(msg, has_file=(msg.get("kind") == "text"))
-        if msg.get("kind") == "file":
+        is_new = store.add_message(msg, has_file=(msg.get("kind") not in ("file", "audio")))
+        if msg.get("kind") in ("file", "audio"):
             local_path = FILES_DIR / f"{msg['id']}_{msg['file_name']}"
             if not local_path.exists():
                 if fetch_from:
@@ -357,7 +667,7 @@ def broadcast_new_message(msg):
     socketio.emit("new_message", msg)
 
 
-mesh = MeshNode(NODE_ID, broadcast_new_message)
+mesh = MeshNode(NODE_ID, lambda msg: broadcast_new_message(_try_decrypt_message(msg)))
 
 
 @app.route("/")
@@ -377,7 +687,7 @@ def sw():
 
 @app.route("/api/messages")
 def api_messages():
-    return jsonify(store.recent())
+    return jsonify([_try_decrypt_message(m) for m in store.recent()])
 
 
 @app.route("/api/peers")
@@ -387,6 +697,11 @@ def api_peers():
         "node_id": NODE_ID,
         "peers": [{"id": pid, **info} for pid, info in peers.items()],
     })
+
+
+@app.route("/api/known_nodes")
+def api_known_nodes():
+    return jsonify(store.list_known_nodes())
 
 
 @app.route("/api/send", methods=["POST"])
@@ -399,6 +714,8 @@ def api_send():
         "ts": time.time(),
         "kind": "text",
         "text": data.get("text", "").strip()[:4000],
+        "scope": "global",
+        "origin_node_id": NODE_ID,
     }
     if not msg["text"]:
         return jsonify({"ok": False, "error": "mensagem vazia"}), 400
@@ -408,6 +725,103 @@ def api_send():
     return jsonify({"ok": True, "message": msg})
 
 
+@app.route("/api/send_direct", methods=["POST"])
+def api_send_direct():
+    data = request.get_json(force=True)
+    recipient_id = data.get("recipient_id")
+    text = (data.get("text") or "").strip()[:4000]
+    if not recipient_id or not text:
+        return jsonify({"ok": False, "error": "destinatário ou texto vazio"}), 400
+    try:
+        ciphertext, encrypted = _encrypt_for_scope(text.encode(), "direct", recipient_id=recipient_id)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    msg_id = uuid.uuid4().hex
+    ts = time.time()
+    sender_id = data.get("sender_id") or NODE_ID
+    sender_name = data.get("sender_name") or "Anônimo"
+    stored_text = base64.b64encode(ciphertext).decode() if encrypted else ciphertext.decode()
+    stored = {
+        "id": msg_id, "sender_id": sender_id, "sender_name": sender_name, "ts": ts,
+        "kind": "text", "text": stored_text,
+        "scope": "direct", "recipient_id": recipient_id, "encrypted": encrypted,
+        "origin_node_id": NODE_ID,
+    }
+    store.add_message(stored, has_file=True)
+    plain = dict(stored, text=text, encrypted=False, hidden=False)
+    broadcast_new_message(plain)
+    mesh.sync_now()
+    return jsonify({"ok": True, "message": plain})
+
+
+@app.route("/api/send_group", methods=["POST"])
+def api_send_group():
+    data = request.get_json(force=True)
+    group_id = data.get("group_id")
+    text = (data.get("text") or "").strip()[:4000]
+    group = store.get_group(group_id)
+    if not group or not text:
+        return jsonify({"ok": False, "error": "grupo ou texto inválido"}), 400
+    ciphertext, encrypted = _encrypt_for_scope(text.encode(), "group", group_id=group_id)
+
+    msg_id = uuid.uuid4().hex
+    ts = time.time()
+    sender_id = data.get("sender_id") or NODE_ID
+    sender_name = data.get("sender_name") or "Anônimo"
+    stored_text = base64.b64encode(ciphertext).decode() if encrypted else ciphertext.decode()
+    stored = {
+        "id": msg_id, "sender_id": sender_id, "sender_name": sender_name, "ts": ts,
+        "kind": "text", "text": stored_text,
+        "scope": "group", "group_id": group_id, "encrypted": encrypted,
+        "origin_node_id": NODE_ID,
+    }
+    store.add_message(stored, has_file=True)
+    plain = dict(stored, text=text, encrypted=False, hidden=False)
+    broadcast_new_message(plain)
+    mesh.sync_now()
+    return jsonify({"ok": True, "message": plain})
+
+
+@app.route("/api/groups", methods=["GET"])
+def api_groups_list():
+    return jsonify(store.list_groups())
+
+
+@app.route("/api/groups", methods=["POST"])
+def api_groups_create():
+    data = request.get_json(force=True)
+    name = (data.get("name") or "").strip()[:80]
+    kind = data.get("kind") if data.get("kind") in ("open", "private") else "private"
+    if not name:
+        return jsonify({"ok": False, "error": "nome vazio"}), 400
+    group_id = uuid.uuid4().hex
+    key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE) if kind == "private" else None
+    store.create_group(group_id, name, kind, key)
+    store.add_member(group_id, NODE_ID)
+    invite = {
+        "group_id": group_id, "name": name, "kind": kind,
+        "key": base64.b64encode(key).decode() if key else None,
+    }
+    return jsonify({"ok": True, "group": store.get_group_public(group_id), "invite": invite})
+
+
+@app.route("/api/groups/join", methods=["POST"])
+def api_groups_join():
+    data = request.get_json(force=True)
+    group_id = data.get("group_id")
+    name = (data.get("name") or "Grupo").strip()[:80]
+    kind = data.get("kind") if data.get("kind") in ("open", "private") else "private"
+    key_b64 = data.get("key")
+    key = base64.b64decode(key_b64) if key_b64 else None
+    if not group_id:
+        return jsonify({"ok": False, "error": "convite inválido"}), 400
+    if not store.get_group(group_id):
+        store.create_group(group_id, name, kind, key)
+    store.add_member(group_id, NODE_ID)
+    return jsonify({"ok": True, "group": store.get_group_public(group_id)})
+
+
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
     f = request.files.get("file")
@@ -415,18 +829,34 @@ def api_upload():
         return jsonify({"ok": False, "error": "nenhum arquivo"}), 400
     sender_id = request.form.get("sender_id") or NODE_ID
     sender_name = request.form.get("sender_name") or "Anônimo"
+    kind = request.form.get("kind") if request.form.get("kind") in ("file", "audio") else "file"
+    scope = request.form.get("scope") if request.form.get("scope") in ("global", "direct", "group") else "global"
+    group_id = request.form.get("group_id")
+    recipient_id = request.form.get("recipient_id")
+
+    raw = f.read()
+    try:
+        data, encrypted = _encrypt_for_scope(raw, scope, group_id=group_id, recipient_id=recipient_id)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
     msg_id = uuid.uuid4().hex
     safe_name = os.path.basename(f.filename)
     local_path = FILES_DIR / f"{msg_id}_{safe_name}"
-    f.save(local_path)
+    local_path.write_bytes(data)
     msg = {
         "id": msg_id,
         "sender_id": sender_id,
         "sender_name": sender_name,
         "ts": time.time(),
-        "kind": "file",
+        "kind": kind,
         "file_name": safe_name,
-        "file_size": local_path.stat().st_size,
+        "file_size": len(raw),
+        "scope": scope,
+        "group_id": group_id,
+        "recipient_id": recipient_id,
+        "encrypted": encrypted,
+        "origin_node_id": NODE_ID,
     }
     store.add_message(msg, has_file=True)
     broadcast_new_message(msg)
@@ -436,9 +866,15 @@ def api_upload():
 
 @app.route("/files/<msg_id>")
 def get_file(msg_id):
-    conn = sqlite3.connect(str(DB_PATH))
+    """Bytes crus, exatamente como estão em disco (cifrados se a mensagem
+    for de escopo direto/grupo privado). Usado só pelo repasse entre nós
+    (_fetch_file_http) - NUNCA decifra aqui, senão qualquer um na rede local
+    que descobrisse essa URL leria o conteúdo sem ter a chave."""
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM messages WHERE id=? AND kind='file'", (msg_id,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM messages WHERE id=? AND kind IN ('file','audio')", (msg_id,)
+    ).fetchone()
     conn.close()
     if not row:
         abort(404)
@@ -447,6 +883,33 @@ def get_file(msg_id):
         abort(404)
     mime = mimetypes.guess_type(row["file_name"])[0] or "application/octet-stream"
     return send_file(local_path, mimetype=mime, download_name=row["file_name"])
+
+
+@app.route("/files/<msg_id>/view")
+def get_file_view(msg_id):
+    """Bytes decifrados pra quem tem o direito de ver - usado pela própria
+    interface deste nó (player de áudio, link de download)."""
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM messages WHERE id=? AND kind IN ('file','audio')", (msg_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        abort(404)
+    row = dict(row)
+    local_path = FILES_DIR / f"{msg_id}_{row['file_name']}"
+    if not local_path.exists():
+        abort(404)
+    data = local_path.read_bytes()
+    if row.get("encrypted"):
+        data = _decrypt_for_scope(data, row)
+        if data is None:
+            abort(403)
+    mime = mimetypes.guess_type(row["file_name"])[0] or "application/octet-stream"
+    resp = Response(data, mimetype=mime)
+    resp.headers["Content-Disposition"] = f'inline; filename="{row["file_name"]}"'
+    return resp
 
 
 _LOGO_DATA_URI = None
@@ -458,7 +921,6 @@ def _logo_data_uri():
     global _LOGO_DATA_URI
     if _LOGO_DATA_URI is None:
         try:
-            import base64
             logo_path = BASE_DIR / "static" / "icons" / "icon-512.png"
             _LOGO_DATA_URI = "data:image/png;base64," + base64.b64encode(logo_path.read_bytes()).decode()
         except OSError:
@@ -466,11 +928,78 @@ def _logo_data_uri():
     return _LOGO_DATA_URI
 
 
+def _fmt_age(ts):
+    if not ts:
+        return "nunca"
+    s = time.time() - ts
+    if s < 60:
+        return f"{int(s)}s atrás"
+    if s < 3600:
+        return f"{int(s // 60)}min atrás"
+    return f"{int(s // 3600)}h atrás"
+
+
+@app.route("/debug")
+def debug_page():
+    peers = mesh.live_peers()
+    rows = []
+    for pid, info in peers.items():
+        sync = mesh.sync_log.get(pid, {})
+        incoming = mesh.incoming_log.get(pid, {}) or mesh.incoming_log.get(info.get("ip"), {})
+        sync_status = "✅ ok" if sync.get("ok") else (f"❌ {sync.get('error')}" if sync else "— (ainda não tentou)")
+        in_status = "✅ ok" if incoming.get("ok") else (f"❌ {incoming.get('error')}" if incoming else "— (nunca recebeu conexão dele)")
+        rows.append(f"""
+        <tr>
+          <td>{info.get('name','?')}<br><span class="mono">{pid[:10]}…</span></td>
+          <td class="mono">{info.get('ip')}:{info.get('port')}</td>
+          <td>{_fmt_age(info.get('last_seen'))}</td>
+          <td>{sync_status}<br><span class="dim">último sucesso: {_fmt_age(sync.get('last_success'))}</span></td>
+          <td>{in_status}<br><span class="dim">último sucesso: {_fmt_age(incoming.get('last_success'))}</span></td>
+        </tr>""")
+    known = store.list_known_nodes()
+    known_rows = "".join(
+        f"<tr><td>{n.get('name') or '?'}</td><td class='mono'>{n['node_id'][:10]}…</td><td>{_fmt_age(n.get('last_seen'))}</td></tr>"
+        for n in known
+    )
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Kraken — Diagnóstico</title>
+    <style>
+      body{{font-family:sans-serif;background:#fff;color:#222;padding:16px;font-size:13px}}
+      h1{{font-size:18px}} h2{{font-size:15px;margin-top:24px}}
+      table{{width:100%;border-collapse:collapse;margin-top:8px}}
+      td,th{{border:1px solid #e7e3ee;padding:6px 8px;text-align:left;vertical-align:top}}
+      .mono{{font-family:monospace;font-size:11px}}
+      .dim{{color:#888;font-size:11px}}
+      a.btn{{display:inline-block;margin-top:10px;padding:8px 16px;background:#7B2CBF;
+        color:#fff;border-radius:8px;text-decoration:none}}
+    </style></head><body>
+    <h1>🩺 Diagnóstico do Kraken</h1>
+    <p>Meu nó: <span class="mono">{NODE_ID}</span> ({mesh.display_name})</p>
+
+    <h2>Peers descobertos na rede local ({len(peers)})</h2>
+    <table>
+      <tr><th>Nó</th><th>Endereço</th><th>Visto por último</th>
+          <th>Sincronizar → ele (eu inicio)</th><th>Ele → mim (ele inicia)</th></tr>
+      {''.join(rows) if rows else '<tr><td colspan="5">Nenhum peer descoberto ainda.</td></tr>'}
+    </table>
+
+    <h2>Nós conhecidos (têm chave guardada, p/ mensagem direta) ({len(known)})</h2>
+    <table>
+      <tr><th>Nome</th><th>ID</th><th>Visto por último</th></tr>
+      {known_rows if known_rows else '<tr><td colspan="3">Nenhum ainda.</td></tr>'}
+    </table>
+
+    <p><a class="btn" href="/">← Voltar pro chat</a></p>
+    </body></html>"""
+
+
 @app.route("/join")
 def join():
     ip = local_ip()
     url = f"http://{ip}:{HTTP_PORT}/"
     svg_bytes = ""
+    debug_error = ""
     try:
         import qrcode
         import qrcode.image.svg
@@ -479,8 +1008,11 @@ def join():
         buf = BytesIO()
         img.save(buf)
         svg_bytes = buf.getvalue().decode()
-    except Exception as e:
-        print(f"[join] falha ao gerar QR code: {e!r}")
+    except Exception:
+        import traceback
+        debug_error = traceback.format_exc()
+        print(f"[join] falha ao gerar QR code:\n{debug_error}")
+    logo_uri = _logo_data_uri()
     return f"""<!doctype html><html><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Entrar no Kraken</title>
@@ -491,11 +1023,15 @@ def join():
         color:#fff;border-radius:999px;text-decoration:none;font-weight:bold}}
       .roxo{{color:#7B2CBF}} .amarelo{{color:#E6B800}}
       .logo{{width:110px;height:110px}}
+      .debug{{text-align:left;background:#fff3f3;border:1px solid #f0b0b0;color:#a33;
+        font-size:11px;padding:10px;margin-top:20px;white-space:pre-wrap;word-break:break-all}}
     </style></head><body>
-    <img class="logo" src="{_logo_data_uri()}" alt="Kraken">
+    <img class="logo" src="{logo_uri}" alt="Kraken">
     <h1><span class="roxo">Kraken</span></h1>
     <p>Escaneie ou toque para entrar na conversa deste nó:</p>
     <div class="qr">{svg_bytes}</div>
+    {f'<div class="debug">ERRO NO QR (debug temporário):<br>{debug_error}</div>' if debug_error else ''}
+    {f'<div class="debug">Logo vazio: caminho tentado = {BASE_DIR / "static" / "icons" / "icon-512.png"}</div>' if not logo_uri else ''}
     <p><code>{url}</code></p>
     <a class="btn" href="{url}">Entrar agora</a>
     </body></html>"""
@@ -510,15 +1046,19 @@ def configure_data_dir(path):
     """Chamado pelo KrakenService (Android) logo após importar o módulo,
     ANTES de start_server(), com o diretório gravável de verdade do app
     (getFilesDir()). Recria tudo que dependia do caminho padrão do Termux."""
-    global DATA_DIR, FILES_DIR, DB_PATH, NODE_ID_PATH, NODE_ID, store, mesh
+    global DATA_DIR, FILES_DIR, DB_PATH, NODE_ID_PATH, NODE_KEY_PATH
+    global NODE_ID, NODE_PRIVKEY, NODE_PUBKEY, store, mesh
     DATA_DIR = Path(path)
     FILES_DIR = DATA_DIR / "files"
     DB_PATH = DATA_DIR / "craque.db"
     NODE_ID_PATH = DATA_DIR / "node_id.txt"
+    NODE_KEY_PATH = DATA_DIR / "node_key.bin"
     FILES_DIR.mkdir(parents=True, exist_ok=True)
     NODE_ID = get_node_id()
+    NODE_PRIVKEY = _load_or_create_node_key()
+    NODE_PUBKEY = NODE_PRIVKEY.public_key
     store = Store(DB_PATH)
-    mesh = MeshNode(NODE_ID, broadcast_new_message)
+    mesh = MeshNode(NODE_ID, lambda msg: broadcast_new_message(_try_decrypt_message(msg)))
 
 
 def start_server():
