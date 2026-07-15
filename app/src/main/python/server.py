@@ -32,6 +32,7 @@ import mimetypes
 import os
 import socket
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -44,7 +45,17 @@ from flask import Flask, Response, abort, jsonify, request, send_file, send_from
 from flask_socketio import SocketIO
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
+
+# Empacotado com PyInstaller (versão PC): os recursos (static/templates)
+# ficam extraídos num diretório temporário (sys._MEIPASS), mas os dados
+# (mensagens, chaves) precisam ficar num lugar persistente do lado de fora
+# desse temp - ao lado do .exe, pra sobreviver entre execuções.
+if getattr(sys, "frozen", False):
+    RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", BASE_DIR))
+    DATA_DIR = Path(sys.executable).resolve().parent / "kraken_data"
+else:
+    RESOURCE_DIR = BASE_DIR
+    DATA_DIR = BASE_DIR / "data"
 FILES_DIR = DATA_DIR / "files"
 DB_PATH = DATA_DIR / "craque.db"
 NODE_ID_PATH = DATA_DIR / "node_id.txt"
@@ -689,7 +700,7 @@ class MeshNode:
 
 
 # ---------------- Flask app ----------------
-app = Flask(__name__, static_folder="static", template_folder="templates")
+app = Flask(__name__, static_folder=str(RESOURCE_DIR / "static"), template_folder=str(RESOURCE_DIR / "templates"))
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024  # 64MB por arquivo
 socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
@@ -962,7 +973,7 @@ def _logo_data_uri():
     global _LOGO_DATA_URI
     if _LOGO_DATA_URI is None:
         try:
-            logo_path = BASE_DIR / "static" / "icons" / "icon-512.png"
+            logo_path = RESOURCE_DIR / "static" / "icons" / "icon-512.png"
             _LOGO_DATA_URI = "data:image/png;base64," + base64.b64encode(logo_path.read_bytes()).decode()
         except OSError:
             _LOGO_DATA_URI = ""
@@ -1072,7 +1083,7 @@ def join():
     <p>Escaneie ou toque para entrar na conversa deste nó:</p>
     <div class="qr">{svg_bytes}</div>
     {f'<div class="debug">ERRO NO QR (debug temporário):<br>{debug_error}</div>' if debug_error else ''}
-    {f'<div class="debug">Logo vazio: caminho tentado = {BASE_DIR / "static" / "icons" / "icon-512.png"}</div>' if not logo_uri else ''}
+    {f'<div class="debug">Logo vazio: caminho tentado = {RESOURCE_DIR / "static" / "icons" / "icon-512.png"}</div>' if not logo_uri else ''}
     <p><code>{url}</code></p>
     <a class="btn" href="{url}">Entrar agora</a>
     </body></html>"""
@@ -1126,5 +1137,18 @@ def start_server():
             time.sleep(2)
 
 
+def _abrir_navegador_desktop():
+    """Só roda quando o server.py é executado direto (Termux/desktop/.exe
+    empacotado) - o KrakenService no Android chama start_server() sem
+    passar por aqui, então o WebView continua sendo quem abre a tela lá."""
+    import webbrowser
+    time.sleep(1.5)
+    try:
+        webbrowser.open(f"http://127.0.0.1:{HTTP_PORT}/")
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    threading.Thread(target=_abrir_navegador_desktop, daemon=True).start()
     start_server()
