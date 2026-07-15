@@ -1184,6 +1184,41 @@ def _abrir_navegador_desktop():
         pass
 
 
+def _criar_atalhos_desktop():
+    """Cria atalho na Área de Trabalho e no Menu Iniciar na primeira vez
+    que o .exe empacotado roda - não é um instalador de verdade (não vai
+    pra Program Files, não tem desinstalador), mas resolve o essencial sem
+    precisar de outra ferramenta de build. Só roda uma vez (marcador em
+    DATA_DIR) e só faz sentido no Windows empacotado."""
+    if not getattr(sys, "frozen", False) or os.name != "nt":
+        return
+    marcador = DATA_DIR / ".atalhos_criados"
+    if marcador.exists():
+        return
+    try:
+        import subprocess
+        exe = str(Path(sys.executable).resolve())
+        pasta_exe = str(Path(exe).parent)
+        destinos = [
+            str(Path(os.environ["USERPROFILE"]) / "Desktop" / "Kraken.lnk"),
+            str(Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Kraken.lnk"),
+        ]
+        for destino in destinos:
+            script = (
+                f'$s = (New-Object -ComObject WScript.Shell).CreateShortcut("{destino}"); '
+                f'$s.TargetPath = "{exe}"; $s.WorkingDirectory = "{pasta_exe}"; '
+                f'$s.IconLocation = "{exe}"; $s.Save()'
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, timeout=15,
+            )
+        marcador.write_text("ok")
+    except Exception:
+        pass  # atalho é conveniência, nunca deve impedir o app de abrir
+
+
 if __name__ == "__main__":
+    _criar_atalhos_desktop()
     threading.Thread(target=_abrir_navegador_desktop, daemon=True).start()
     start_server()
