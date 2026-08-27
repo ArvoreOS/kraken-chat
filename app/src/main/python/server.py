@@ -602,15 +602,36 @@ class MeshNode:
                         break
 
     # ---------- descoberta ----------
+    @staticmethod
+    def _directed_broadcast_addrs():
+        """255.255.255.255 (broadcast genérico) às vezes sai pela interface
+        errada quando o celular tem mais de uma rede ativa ao mesmo tempo
+        (WiFi do hotspot E dado móvel, por exemplo) - o sistema operacional
+        tem que adivinhar qual interface usar. Somando o broadcast
+        "dirigido" da própria sub-rede (assume /24, o normal em
+        hotspot/rede doméstica - ex: IP 192.168.43.5 -> 192.168.43.255) dá
+        uma pista bem mais específica, que tende a sair pela interface
+        certa mesmo com várias ativas. Achado investigando por que 2
+        celulares no mesmo hotspot não se achavam (2026-08-27).
+        """
+        addrs = {"255.255.255.255"}
+        ip = local_ip()
+        if ip and ip != "127.0.0.1":
+            partes = ip.split(".")
+            if len(partes) == 4:
+                addrs.add(f"{partes[0]}.{partes[1]}.{partes[2]}.255")
+        return addrs
+
     def _discovery_broadcast(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         while True:
-            try:
-                payload = f"CRAQUE_HELLO|{self.node_id}|{GOSSIP_PORT}|{self.display_name}"
-                s.sendto(payload.encode(), ("255.255.255.255", DISCOVERY_PORT))
-            except OSError:
-                pass
+            payload = f"CRAQUE_HELLO|{self.node_id}|{GOSSIP_PORT}|{self.display_name}"
+            for addr in self._directed_broadcast_addrs():
+                try:
+                    s.sendto(payload.encode(), (addr, DISCOVERY_PORT))
+                except OSError:
+                    pass
             time.sleep(DISCOVERY_INTERVAL)
 
     def _discovery_listen(self):

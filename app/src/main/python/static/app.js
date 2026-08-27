@@ -242,7 +242,13 @@
       // está na mesma rede, sem travar o resto da lista por causa disso.
     }
 
-    const peers = [...lanPeers, ...relayPeers];
+    // Um peer pode aparecer nos dois caminhos ao mesmo tempo (achado pela
+    // rede local E com presença no relay) - mostra só uma vez, preferindo
+    // o caminho local (mais rápido, sem depender da Oracle).
+    const porId = new Map();
+    for (const p of lanPeers) porId.set(p.id, p);
+    for (const p of relayPeers) if (!porId.has(p.id)) porId.set(p.id, p);
+    const peers = Array.from(porId.values());
     if (peers.length === 0) {
       openModal("<h3>Chamada de vídeo</h3><p class='muted'>Ninguém pra chamar agora - nem na mesma rede, nem à distância.</p>");
       return;
