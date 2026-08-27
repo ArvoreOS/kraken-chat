@@ -832,6 +832,21 @@ def api_messages():
     return jsonify([_try_decrypt_message(m) for m in store.recent()])
 
 
+@app.route("/api/set_display_name", methods=["POST"])
+def api_set_display_name():
+    # mesh.display_name é o nome anunciado pra quem descobre esse nó na
+    # rede local (broadcast UDP) - ficava sempre no "Nó XXXX" genérico
+    # (nunca era atualizado com o nome da conta/login), então quem achava
+    # um peer pela rede local via um identificador sem sentido, mesmo que
+    # o peer já tivesse feito login com nome de verdade. Achado real
+    # testando a chamada de vídeo (2026-08-27).
+    data = request.get_json(force=True) or {}
+    name = (data.get("name") or "").strip()
+    if name:
+        mesh.display_name = name
+    return jsonify({"ok": True})
+
+
 @app.route("/api/peers")
 def api_peers():
     peers = mesh.live_peers()

@@ -28,6 +28,8 @@ public class MainActivity extends Activity {
 
     private WebView webView;
     private static final String URL = "http://127.0.0.1:5000/";
+    private static final int WEB_PERMISSION_REQUEST = 4213;
+    private PermissionRequest pendingWebPermissionRequest;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -79,23 +81,46 @@ public class MainActivity extends Activity {
                 // Android concedida.
                 runOnUiThread(() -> {
                     List<String> granted = new ArrayList<>();
+                    List<String> androidPermsFaltando = new ArrayList<>();
                     for (String resource : request.getResources()) {
-                        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)
-                                && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO)
-                                        == PackageManager.PERMISSION_GRANTED) {
-                            granted.add(resource);
+                        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) {
+                            if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO)
+                                    == PackageManager.PERMISSION_GRANTED) {
+                                granted.add(resource);
+                            } else {
+                                androidPermsFaltando.add(Manifest.permission.RECORD_AUDIO);
+                            }
                         }
-                        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(resource)
-                                && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA)
-                                        == PackageManager.PERMISSION_GRANTED) {
-                            granted.add(resource);
+                        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(resource)) {
+                            if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA)
+                                    == PackageManager.PERMISSION_GRANTED) {
+                                granted.add(resource);
+                            } else {
+                                androidPermsFaltando.add(Manifest.permission.CAMERA);
+                            }
                         }
                     }
-                    if (!granted.isEmpty()) {
-                        request.grant(granted.toArray(new String[0]));
-                    } else {
-                        request.deny();
+                    if (androidPermsFaltando.isEmpty()) {
+                        // Tudo que foi pedido já estava liberado no Android -
+                        // caminho de sempre, sem novidade.
+                        if (!granted.isEmpty()) {
+                            request.grant(granted.toArray(new String[0]));
+                        } else {
+                            request.deny();
+                        }
+                        return;
                     }
+                    // Achado real (2026-08-27): antes disso, se a permissão do
+                    // Android não tinha sido concedida na hora de abrir o app
+                    // (onCreate), nunca mais existia outra chance de pedir -
+                    // negava pra sempre, mesmo clicando em "Live" de novo.
+                    // Agora pede o pedido de verdade do Android bem na hora
+                    // que o recurso é usado (ex: botão Live), guarda esse
+                    // pedido do WebView pendente, e completa ele em
+                    // onRequestPermissionsResult quando a pessoa responder.
+                    pendingWebPermissionRequest = request;
+                    ActivityCompat.requestPermissions(MainActivity.this,
+                            androidPermsFaltando.toArray(new String[0]), WEB_PERMISSION_REQUEST);
                 });
             }
         });
@@ -176,6 +201,32 @@ public class MainActivity extends Activity {
             }
             pendingFileCallback.onReceiveValue(results);
             pendingFileCallback = null;
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != WEB_PERMISSION_REQUEST || pendingWebPermissionRequest == null) return;
+        PermissionRequest request = pendingWebPermissionRequest;
+        pendingWebPermissionRequest = null;
+        List<String> granted = new ArrayList<>();
+        for (String resource : request.getResources()) {
+            if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)
+                    && ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                            == PackageManager.PERMISSION_GRANTED) {
+                granted.add(resource);
+            }
+            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(resource)
+                    && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                            == PackageManager.PERMISSION_GRANTED) {
+                granted.add(resource);
+            }
+        }
+        if (!granted.isEmpty()) {
+            request.grant(granted.toArray(new String[0]));
+        } else {
+            request.deny();
         }
     }
 

@@ -683,6 +683,16 @@
     setInterval(pollPeers, 5000);
     startCallRelayLoop();
     renderTabs();
+    // mesh.display_name (o nome anunciado pra quem te acha na rede local)
+    // é só de memória - reseta pro genérico "Nó XXXX" toda vez que o app
+    // reinicia. Manda de novo toda vez que entra no chat, não só no login.
+    if (myName()) {
+      fetch("/api/set_display_name", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: myName() }),
+      }).catch(() => {});
+    }
   }
 
   // ---------- login / criar conta ----------
