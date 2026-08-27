@@ -148,6 +148,28 @@
     return "call-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
   }
 
+  // Achado real (2026-08-27): se uma chamada anterior ficar "pra trás" sem
+  // passar por callReset() - ex: o app foi pro segundo plano no meio de
+  // uma chamada que nunca conectou, ou o usuário saiu sem apertar
+  // Encerrar - a câmera/microfone fica presa naquela stream antiga. A
+  // PRÓXIMA tentativa de getUserMedia (mesmo o gravador de áudio antigo,
+  // recurso separado) falha com NotReadableError, mesmo com a permissão
+  // certinha, porque o hardware já está em uso pela stream que nunca foi
+  // liberada. Duas camadas de proteção:
+  function ensureCallStateClean() {
+    if (callState) callReset();
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden || !callState) return;
+    const pc = callState.pc;
+    if (!pc || pc.connectionState !== "connected") {
+      // Ainda chamando/tocando, nunca conectou de verdade - libera a
+      // câmera/microfone se o app foi pro segundo plano nesse meio tempo,
+      // em vez de deixar presa até o Android matar o processo.
+      callReset();
+    }
+  });
+
   function waitIceGatheringComplete(pc) {
     if (pc.iceGatheringState === "complete") return Promise.resolve();
     return new Promise((resolve) => {
@@ -214,6 +236,7 @@
   }
 
   async function openPeerPicker() {
+    ensureCallStateClean();
     let data;
     try {
       const res = await fetch("/api/peers");
@@ -267,6 +290,7 @@
   }
 
   async function startCall(peer, me) {
+    ensureCallStateClean();
     const callId = newCallId();
     const { stream, error } = await getCallMediaStream();
     if (error) {
