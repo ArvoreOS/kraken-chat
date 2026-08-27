@@ -71,6 +71,15 @@ DISCOVERY_INTERVAL = 3
 PEER_TIMEOUT = 15
 SYNC_INTERVAL = 10
 MAX_SYNC_IDS = 3000
+# Teto de segurança pro protocolo de gossip (_recv_json): o prefixo de tamanho
+# é 8 bytes lidos direto do socket, sem checagem nenhuma antes desse fix -
+# achado real em produção no nó-semente (2026-08-27): qualquer scanner de
+# internet que bate na porta de gossip manda lixo aleatório nesses 8 bytes,
+# que vira um número gigantesco, e o Python tentava alocar um buffer desse
+# tamanho na hora (MemoryError). Vale pra qualquer nó, não só o nó-semente -
+# um peer malicioso na rede local também poderia mandar isso. 50MB é folga
+# generosa pro maior payload real do protocolo.
+MAX_GOSSIP_JSON_SIZE = 50 * 1024 * 1024
 
 # Nó-semente sempre online (Oceano Livre, Oracle) - ponte híbrida: quem tem
 # internet sincroniza com ele além da malha local, o que costura qualquer
@@ -726,6 +735,8 @@ class MeshNode:
     def _recv_json(conn):
         size_bytes = MeshNode._recv_exact(conn, 8)
         size = int.from_bytes(size_bytes, "big")
+        if size > MAX_GOSSIP_JSON_SIZE:
+            raise ValueError(f"tamanho declarado absurdo pro protocolo de gossip: {size} bytes")
         data = MeshNode._recv_exact(conn, size)
         return json.loads(data.decode())
 
