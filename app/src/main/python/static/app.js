@@ -195,13 +195,22 @@
     return pc;
   }
 
-  // Pega câmera/microfone e devolve {stream} ou {error} com o motivo real -
-  // a mensagem genérica de antes ("confere a permissão") escondia se o
-  // problema era permissão negada de verdade (NotAllowedError), câmera não
-  // encontrada (NotFoundError), câmera ocupada por outro app
-  // (NotReadableError), ou a API nem existir nesse navegador/contexto
-  // (TypeError - ex: página carregada por http:// num IP, não localhost -
-  // getUserMedia só existe em contexto seguro).
+  // Pega câmera/microfone e devolve {stream, semAudio?} ou {error} com o
+  // motivo real - a mensagem genérica de antes ("confere a permissão")
+  // escondia se o problema era permissão negada de verdade
+  // (NotAllowedError), câmera não encontrada (NotFoundError), câmera/mic
+  // ocupado por OUTRO app (NotReadableError - achado real: um gravador de
+  // tela com "gravar microfone" ligado prende o microfone inteiro,
+  // impedindo qualquer outro app de usar, mesmo com permissão certa) ou a
+  // API nem existir nesse navegador/contexto (TypeError - ex: página
+  // carregada por http:// num IP, não localhost).
+  //
+  // Como "abrir a câmera" é o pedido de verdade (a pessoa quer SE VER e
+  // ser vista, áudio é secundário), tenta vídeo+áudio primeiro e, se
+  // falhar, tenta só vídeo antes de desistir - assim um microfone preso
+  // por outro app (gravador de tela, assistente de voz, etc.) não
+  // impede mais a câmera de abrir. A chamada continua sem áudio nesse
+  // caso, mas não fica travada.
   async function getCallMediaStream() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       return { error: "getUserMedia indisponível nesse navegador (a API só existe em contexto seguro - localhost/https)." };
@@ -209,8 +218,13 @@
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       return { stream };
-    } catch (e) {
-      return { error: `${e.name || "Erro"}: ${e.message || "sem detalhe"}` };
+    } catch (eComAudio) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        return { stream, semAudio: true, motivoSemAudio: `${eComAudio.name || "Erro"}: ${eComAudio.message || "sem detalhe"}` };
+      } catch (eSoVideo) {
+        return { error: `${eSoVideo.name || "Erro"}: ${eSoVideo.message || "sem detalhe"}` };
+      }
     }
   }
 
@@ -292,18 +306,23 @@
   async function startCall(peer, me) {
     ensureCallStateClean();
     const callId = newCallId();
-    const { stream, error } = await getCallMediaStream();
+    const { stream, error, semAudio, motivoSemAudio } = await getCallMediaStream();
     if (error) {
       openModal(`<h3>Chamada de vídeo</h3><p class='muted'>Não consegui acessar câmera/microfone.</p><p class='muted' style="font-size:11px">${error}</p>`);
       return;
     }
+    if (semAudio) {
+      console.warn("Chamada sem áudio - microfone indisponível:", motivoSemAudio);
+    }
     const pc = makePeerConnection();
     stream.getTracks().forEach((t) => pc.addTrack(t, stream));
-    callState = { call_id: callId, role: "caller", pc, localStream: stream, peer };
+    callState = { call_id: callId, role: "caller", pc, localStream: stream, peer, semAudio };
 
     callScreen.classList.remove("hidden");
     callLocalVideo.srcObject = stream;
-    callStatusText.textContent = `Chamando ${peer.name}…`;
+    callStatusText.textContent = semAudio
+      ? `Chamando ${peer.name}… (sem áudio - microfone ocupado)`
+      : `Chamando ${peer.name}…`;
     callHangupBtn.classList.remove("hidden");
 
     const offer = await pc.createOffer();
@@ -404,21 +423,27 @@
   async function acceptCall() {
     if (!callState || !callState.pendingOffer) return;
     const { call_id, peer, pendingOffer } = callState;
-    const { stream, error } = await getCallMediaStream();
+    const { stream, error, semAudio, motivoSemAudio } = await getCallMediaStream();
     if (error) {
       openModal(`<h3>Chamada de vídeo</h3><p class='muted'>Não consegui acessar câmera/microfone.</p><p class='muted' style="font-size:11px">${error}</p>`);
       rejectCall();
       return;
     }
+    if (semAudio) {
+      console.warn("Chamada sem áudio - microfone indisponível:", motivoSemAudio);
+    }
     const pc = makePeerConnection();
     stream.getTracks().forEach((t) => pc.addTrack(t, stream));
     callState.pc = pc;
     callState.localStream = stream;
+    callState.semAudio = semAudio;
     callLocalVideo.srcObject = stream;
     callAcceptBtn.classList.add("hidden");
     callRejectBtn.classList.add("hidden");
     callHangupBtn.classList.remove("hidden");
-    callStatusText.textContent = `Em chamada com ${peer.name}`;
+    callStatusText.textContent = semAudio
+      ? `Em chamada com ${peer.name} (sem áudio - microfone ocupado)`
+      : `Em chamada com ${peer.name}`;
 
     await pc.setRemoteDescription(pendingOffer);
     const answer = await pc.createAnswer();
@@ -450,7 +475,9 @@
   async function handleCallAnswered(data) {
     if (!callState || callState.call_id !== data.call_id || !callState.pc) return;
     await callState.pc.setRemoteDescription(data.sdp);
-    callStatusText.textContent = `Em chamada com ${callState.peer.name}`;
+    callStatusText.textContent = callState.semAudio
+      ? `Em chamada com ${callState.peer.name} (sem áudio - microfone ocupado)`
+      : `Em chamada com ${callState.peer.name}`;
   }
 
   function handleCallRejected(data) {
