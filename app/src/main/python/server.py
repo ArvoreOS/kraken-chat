@@ -1108,10 +1108,20 @@ def join():
         import qrcode
         import qrcode.image.svg
         from io import BytesIO
-        img = qrcode.make(url, image_factory=qrcode.image.svg.SvgImage)
+        # SvgImage (base) gera <svg:rect> com prefixo de namespace - o
+        # parser de HTML do navegador não reconhece isso como forma de SVG
+        # de verdade quando colado dentro de uma página (só funciona como
+        # arquivo .svg isolado), então a caixa ficava em branco sem erro
+        # nenhum. SvgPathImage gera um único <path> sem prefixo - funciona
+        # embutido. Achado real, 2026-08-27.
+        img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage)
         buf = BytesIO()
         img.save(buf)
         svg_bytes = buf.getvalue().decode()
+        # O cabeçalho <?xml ...?> também quebra o parser de HTML no meio do
+        # documento (não é um arquivo .xml isolado) - remove antes de colar.
+        if svg_bytes.startswith("<?xml"):
+            svg_bytes = svg_bytes.split("?>", 1)[1]
     except Exception:
         import traceback
         debug_error = traceback.format_exc()
@@ -1129,6 +1139,7 @@ def join():
       .logo{{width:110px;height:110px}}
       .debug{{text-align:left;background:#fff3f3;border:1px solid #f0b0b0;color:#a33;
         font-size:11px;padding:10px;margin-top:20px;white-space:pre-wrap;word-break:break-all}}
+      a.voltar{{display:block;margin-top:24px;color:#777;text-decoration:none;font-size:14px}}
     </style></head><body>
     <img class="logo" src="{logo_uri}" alt="Kraken">
     <h1><span class="roxo">Kraken</span></h1>
@@ -1138,6 +1149,7 @@ def join():
     {f'<div class="debug">Logo vazio: caminho tentado = {RESOURCE_DIR / "static" / "icons" / "icon-512.png"}</div>' if not logo_uri else ''}
     <p><code>{url}</code></p>
     <a class="btn" href="{url}">Entrar agora</a>
+    <p><a class="voltar" href="/">← Voltar pro chat</a></p>
     </body></html>"""
 
 
