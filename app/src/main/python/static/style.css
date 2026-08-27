@@ -117,16 +117,25 @@ body {
 
 .topbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 8px 10px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--borda);
   background: #fff;
 }
-.brand { display: flex; align-items: center; gap: 8px; flex: 1; }
-.brand-text { font-size: 16px; }
+/* min-width:0 é o que deixa esses 2 encolherem de verdade num flex row -
+   sem isso (achado real, tela estourando os cantos) o navegador nunca
+   deixa um item de flex ficar menor que o próprio conteúdo, e a barra
+   inteira passa da largura da tela em celular estreito. */
+.brand { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
+.brand-text { font-size: 16px; white-space: nowrap; }
 
-.status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #666; }
+.status {
+  display: flex; align-items: center; gap: 6px; font-size: 12px; color: #666;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.topbar-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: #ccc; }
 .dot.online { background: var(--verde); box-shadow: 0 0 0 3px rgba(0,166,81,.15); }
 .dot.mesh { background: var(--amarelo); box-shadow: 0 0 0 3px rgba(230,184,0,.15); }
@@ -249,6 +258,8 @@ body {
 }
 #text-input {
   flex: 1;
+  min-width: 0; /* mesmo achado do topbar - sem isso o campo nunca encolhe
+                   o suficiente e o botão "Enviar" fica cortado fora da tela */
   padding: 12px 14px;
   border-radius: 999px;
   border: 2px solid var(--borda);

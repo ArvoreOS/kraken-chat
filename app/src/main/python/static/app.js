@@ -1,6 +1,14 @@
 (function () {
   const STORAGE_NAME = "kraken_name";
   const STORAGE_ID = "kraken_sender_id";
+  // Marca separada de "fez login de verdade" - versões antigas (antes do
+  // login existir) já deixavam kraken_name gravado com o nome livre de
+  // sempre, e atualizar o app NUNCA limpa o localStorage (mesma origem
+  // 127.0.0.1:5000 em toda versão). Sem essa marca própria, quem já tinha
+  // testado o Kraken antes nunca via a tela de login nova - pulava direto
+  // pro chat com o nome antigo, achando que sumiu sozinha. Achado real
+  // reportado pelo Gilcimar.
+  const STORAGE_LOGGED_IN = "kraken_logged_in";
 
   const nameScreen = document.getElementById("name-screen");
   const chatScreen = document.getElementById("chat-screen");
@@ -718,6 +726,7 @@
         return;
       }
       localStorage.setItem(STORAGE_NAME, data.name);
+      localStorage.setItem(STORAGE_LOGGED_IN, "1");
       showChat();
     } catch (e) {
       loginError.textContent = "Precisa de internet pra entrar (ou criar conta) pela primeira vez.";
@@ -938,7 +947,7 @@
   });
 
   // ---------- inicialização ----------
-  if (myName()) {
+  if (demoName || localStorage.getItem(STORAGE_LOGGED_IN)) {
     showChat();
   } else {
     setLoginMode("login");
