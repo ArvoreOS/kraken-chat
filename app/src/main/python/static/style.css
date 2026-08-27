@@ -425,3 +425,38 @@ body {
 .call-btn.call-accept { background: var(--verde); }
 .call-btn.call-reject, .call-btn.call-hangup { background: #E63946; }
 .modal-list-item:hover { background: var(--bg-bubble-other); }
+
+/* ---------- aviso "baixar o app" pra quem entra pelo navegador comum ---------- */
+.app-banner {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  background: #1c1433;
+  color: #f4f0ff;
+  box-shadow: 0 -6px 20px rgba(0,0,0,.25);
+}
+.app-banner-text { flex: 1; font-size: 13px; line-height: 1.4; }
+.app-banner-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.app-banner-btn {
+  background: linear-gradient(135deg, #00A651, #00c463);
+  color: #04170a;
+  font-weight: 800;
+  font-size: 13px;
+  padding: 9px 16px;
+  border-radius: 999px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.app-banner-dismiss {
+  background: none;
+  border: none;
+  color: #b8adcf;
+  font-size: 18px;
+  padding: 4px 8px;
+  cursor: pointer;
+}

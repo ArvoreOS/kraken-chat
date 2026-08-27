@@ -39,6 +39,9 @@
   const tabsEl = document.getElementById("tabs");
   const modalOverlay = document.getElementById("modal-overlay");
   const modalContent = document.getElementById("modal-content");
+  const appBanner = document.getElementById("app-banner");
+  const appBannerDownload = document.getElementById("app-banner-download");
+  const appBannerDismiss = document.getElementById("app-banner-dismiss");
 
   // Parâmetros de URL só para simulação/teste (?demo_name=Ana&demo_id=phoneA).
   // Não afetam o uso normal, que continua guardando tudo em localStorage.
@@ -69,6 +72,28 @@
     const d = new Date(ts * 1000);
     return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
   }
+
+  // ---------- aviso "baixar o app" pra quem entra pelo navegador comum ----------
+  // O app instalado marca o próprio User-Agent com "Kraken-App" (ver
+  // MainActivity.java) - quem abriu pelo navegador normal (ex: escaneou o
+  // QR do /join e nunca instalou nada) não tem essa marca, então mostra o
+  // aviso. Lembra se a pessoa já dispensou, pra não ficar repetindo toda
+  // vez que ela voltar nesse mesmo navegador.
+  const STORAGE_BANNER_DISMISSED = "kraken_banner_dismissed";
+
+  function maybeShowAppBanner() {
+    if (navigator.userAgent.includes("Kraken-App")) return; // já é o app instalado
+    if (localStorage.getItem(STORAGE_BANNER_DISMISSED)) return;
+    const isAndroid = /Android/i.test(navigator.userAgent);
+    appBannerDownload.href = isAndroid
+      ? "https://github.com/ArvoreOS/kraken-chat/releases/latest/download/app-debug.apk"
+      : "https://github.com/ArvoreOS/kraken-chat/releases/latest/download/Kraken.exe";
+    appBanner.classList.remove("hidden");
+  }
+  appBannerDismiss.addEventListener("click", () => {
+    localStorage.setItem(STORAGE_BANNER_DISMISSED, "1");
+    appBanner.classList.add("hidden");
+  });
 
   // ---------- modal genérico ----------
   function openModal(html) {
@@ -956,6 +981,7 @@
   if (demoName) {
     document.title = "Kraken — " + demoName;
   }
+  maybeShowAppBanner();
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(() => {});

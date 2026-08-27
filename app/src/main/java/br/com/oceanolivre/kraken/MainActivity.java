@@ -42,6 +42,12 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setAllowFileAccess(true);
+        // Marca própria no User-Agent - é como o app.js (rodando dentro do
+        // WebView OU num navegador comum de quem entrou via QR/convite,
+        // mesmo HTML/JS pros dois) sabe se já está no app instalado (pra
+        // não mostrar o aviso de "baixar o app") ou se é um convidado sem
+        // instalar nada (aí mostra).
+        settings.setUserAgentString(settings.getUserAgentString() + " Kraken-App/" + BuildConfig.VERSION_CODE);
         // O servidor é sempre localhost e muda a cada atualização do app -
         // cache de HTTP aqui só serve pra mostrar tela antiga depois de
         // atualizar (visto em WebView de MIUI/Xiaomi). Sem custo real
