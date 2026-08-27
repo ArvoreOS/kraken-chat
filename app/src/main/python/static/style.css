@@ -424,6 +424,8 @@ body {
 }
 .call-btn.call-accept { background: var(--verde); }
 .call-btn.call-reject, .call-btn.call-hangup { background: #E63946; }
+.call-btn.call-mute { background: rgba(255,255,255,.18); padding: 14px 18px; }
+.call-btn.call-mute.muted { background: #E63946; }
 .modal-list-item:hover { background: var(--bg-bubble-other); }
 
 /* ---------- aviso "baixar o app" pra quem entra pelo navegador comum ---------- */

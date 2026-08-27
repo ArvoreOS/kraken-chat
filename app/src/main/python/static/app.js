@@ -122,6 +122,7 @@
   const callAcceptBtn = document.getElementById("call-accept-btn");
   const callRejectBtn = document.getElementById("call-reject-btn");
   const callHangupBtn = document.getElementById("call-hangup-btn");
+  const callMuteBtn = document.getElementById("call-mute-btn");
   const btnLive = document.getElementById("btn-live");
 
   let callState = null; // {call_id, role, pc, localStream, peer:{id,name,via,ip?,port?}, pendingOffer?}
@@ -142,7 +143,27 @@
     callAcceptBtn.classList.add("hidden");
     callRejectBtn.classList.add("hidden");
     callHangupBtn.classList.add("hidden");
+    callMuteBtn.classList.add("hidden");
+    callMuteBtn.classList.remove("muted");
+    callMuteBtn.textContent = "🎤";
   }
+
+  // Mostra o botão de mutar só quando existe uma faixa de áudio de verdade
+  // pra controlar - numa chamada que caiu no modo "só vídeo" (microfone
+  // ocupado por outro app), não tem o que mutar.
+  function updateMuteBtnVisibility() {
+    const hasAudio = callState && callState.localStream && callState.localStream.getAudioTracks().length > 0;
+    callMuteBtn.classList.toggle("hidden", !hasAudio);
+  }
+  callMuteBtn.addEventListener("click", () => {
+    if (!callState || !callState.localStream) return;
+    const tracks = callState.localStream.getAudioTracks();
+    if (tracks.length === 0) return;
+    const novoEstado = !tracks[0].enabled;
+    tracks.forEach((t) => (t.enabled = novoEstado));
+    callMuteBtn.classList.toggle("muted", !novoEstado);
+    callMuteBtn.textContent = novoEstado ? "🎤" : "🔇";
+  });
 
   function newCallId() {
     return "call-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
@@ -324,6 +345,7 @@
       ? `Chamando ${peer.name}… (sem áudio - microfone ocupado)`
       : `Chamando ${peer.name}…`;
     callHangupBtn.classList.remove("hidden");
+    updateMuteBtnVisibility();
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -441,6 +463,7 @@
     callAcceptBtn.classList.add("hidden");
     callRejectBtn.classList.add("hidden");
     callHangupBtn.classList.remove("hidden");
+    updateMuteBtnVisibility();
     callStatusText.textContent = semAudio
       ? `Em chamada com ${peer.name} (sem áudio - microfone ocupado)`
       : `Em chamada com ${peer.name}`;
@@ -992,8 +1015,16 @@
   }
 
   async function startRecording() {
+    let stream;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      // Mesma melhoria da chamada de vídeo: mostra o erro técnico real em
+      // vez de um texto genérico, pra dar pra diagnosticar de verdade.
+      alert(`Não foi possível acessar o microfone.\n${e.name || "Erro"}: ${e.message || "sem detalhe"}`);
+      return;
+    }
+    try {
       recordedChunks = [];
       discardNextRecording = false;
       mediaRecorder = new MediaRecorder(stream);
@@ -1018,7 +1049,13 @@
       recordBar.classList.remove("hidden");
       startWaveform(stream);
     } catch (e) {
-      alert("não foi possível acessar o microfone");
+      // Achado real (2026-08-27): antes disso, se algo desse errado DEPOIS
+      // de já ter conseguido o stream (ex: MediaRecorder falhar ao criar),
+      // a stream nunca era liberada - o microfone ficava preso pra sempre
+      // (até fechar o app de verdade), fazendo a PRÓXIMA tentativa falhar
+      // também, mesmo sem nenhum outro app usando o microfone.
+      stream.getTracks().forEach((t) => t.stop());
+      alert(`Não consegui gravar o áudio.\n${e.name || "Erro"}: ${e.message || "sem detalhe"}`);
     }
   }
 
