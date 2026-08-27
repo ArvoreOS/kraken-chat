@@ -24,6 +24,7 @@
   const sendForm = document.getElementById("send-form");
   const textInput = document.getElementById("text-input");
   const fileInput = document.getElementById("file-input");
+  const audioCaptureInput = document.getElementById("audio-capture-input");
   const recordBtn = document.getElementById("record-btn");
   const recordBar = document.getElementById("record-bar");
   const recordWave = document.getElementById("record-wave");
@@ -965,6 +966,19 @@
     fileInput.value = "";
   });
 
+  // Alternativa nativa de gravar áudio - o atributo "capture" faz o
+  // Android abrir o gravador de som DE VERDADE do aparelho (fora do
+  // WebView, sem passar por getUserMedia nenhum) em vez do seletor de
+  // arquivo comum. Usada como resposta automática quando a gravação ao
+  // vivo (🎙️) falha - pedido do Gilcimar depois de o microfone ficar
+  // preso no WebView mesmo com o hardware liberado.
+  audioCaptureInput.addEventListener("change", async () => {
+    const file = audioCaptureInput.files[0];
+    if (!file) return;
+    await uploadBlob(file, "audio", file.name || "audio.m4a");
+    audioCaptureInput.value = "";
+  });
+
   // ---------- gravação de áudio (com onda sonora ao vivo + prévia) ----------
   let mediaRecorder = null;
   let recordedChunks = [];
@@ -1019,9 +1033,14 @@
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
-      // Mesma melhoria da chamada de vídeo: mostra o erro técnico real em
-      // vez de um texto genérico, pra dar pra diagnosticar de verdade.
-      alert(`Não foi possível acessar o microfone.\n${e.name || "Erro"}: ${e.message || "sem detalhe"}`);
+      // Achado real (2026-08-27): em alguns celulares o microfone via
+      // WebView (getUserMedia) fica indisponível mesmo com o hardware
+      // livre e a permissão certa - é limitação da própria WebView, não
+      // do Kraken. Em vez de só travar com um alerta, cai automaticamente
+      // pro gravador de som NATIVO do Android (audioCaptureInput, usa
+      // "capture" no input de arquivo - nem passa pelo getUserMedia).
+      console.warn("Gravação ao vivo falhou, caindo pro gravador nativo:", e.name, e.message);
+      audioCaptureInput.click();
       return;
     }
     try {
