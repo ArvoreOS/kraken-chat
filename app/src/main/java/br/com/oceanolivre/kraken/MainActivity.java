@@ -62,6 +62,33 @@ public class MainActivity extends Activity {
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> filePathCallback,
                                               FileChooserParams fileChooserParams) {
                 pendingFileCallback = filePathCallback;
+
+                // Achado real (2026-08-27): o atributo HTML "capture" funciona
+                // bem pra foto/vídeo (abre a câmera direto), mas pra áudio o
+                // Chromium/WebView não tem esse mapeamento confiável em todo
+                // aparelho - testado no Kraken e caiu no seletor de
+                // arquivo/pastas comum em vez de abrir o gravador de som.
+                // Corrigido detectando esse caso na mão e disparando o intent
+                // nativo de gravação de som (RECORD_SOUND_ACTION) direto, sem
+                // depender do Chromium adivinhar certo.
+                boolean querAudio = false;
+                for (String tipo : fileChooserParams.getAcceptTypes()) {
+                    if (tipo != null && tipo.startsWith("audio/")) {
+                        querAudio = true;
+                        break;
+                    }
+                }
+                if (fileChooserParams.isCaptureEnabled() && querAudio) {
+                    Intent gravador = new Intent(android.provider.MediaStore.Audio.Media.RECORD_SOUND_ACTION);
+                    try {
+                        startActivityForResult(gravador, FILE_CHOOSER_REQUEST);
+                        return true;
+                    } catch (Exception e) {
+                        // Nenhum app de gravar som instalado que atenda esse
+                        // intent - cai pro seletor de arquivo comum abaixo.
+                    }
+                }
+
                 Intent intent = fileChooserParams.createIntent();
                 try {
                     startActivityForResult(intent, FILE_CHOOSER_REQUEST);
