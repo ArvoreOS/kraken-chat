@@ -173,6 +173,25 @@
     return pc;
   }
 
+  // Pega câmera/microfone e devolve {stream} ou {error} com o motivo real -
+  // a mensagem genérica de antes ("confere a permissão") escondia se o
+  // problema era permissão negada de verdade (NotAllowedError), câmera não
+  // encontrada (NotFoundError), câmera ocupada por outro app
+  // (NotReadableError), ou a API nem existir nesse navegador/contexto
+  // (TypeError - ex: página carregada por http:// num IP, não localhost -
+  // getUserMedia só existe em contexto seguro).
+  async function getCallMediaStream() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return { error: "getUserMedia indisponível nesse navegador (a API só existe em contexto seguro - localhost/https)." };
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      return { stream };
+    } catch (e) {
+      return { error: `${e.name || "Erro"}: ${e.message || "sem detalhe"}` };
+    }
+  }
+
   // Chamada local (mesma rede): fala direto com o ip:port do outro nó.
   // Chamada à distância: os dois só se alcançam de dentro pra fora do
   // nó-semente (mesmo truque do modo híbrido do chat) - fala com o
@@ -243,11 +262,9 @@
 
   async function startCall(peer, me) {
     const callId = newCallId();
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    } catch (e) {
-      openModal("<h3>Chamada de vídeo</h3><p class='muted'>Não consegui acessar câmera/microfone. Confere a permissão do app.</p>");
+    const { stream, error } = await getCallMediaStream();
+    if (error) {
+      openModal(`<h3>Chamada de vídeo</h3><p class='muted'>Não consegui acessar câmera/microfone.</p><p class='muted' style="font-size:11px">${error}</p>`);
       return;
     }
     const pc = makePeerConnection();
@@ -357,11 +374,9 @@
   async function acceptCall() {
     if (!callState || !callState.pendingOffer) return;
     const { call_id, peer, pendingOffer } = callState;
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    } catch (e) {
-      openModal("<h3>Chamada de vídeo</h3><p class='muted'>Não consegui acessar câmera/microfone. Confere a permissão do app.</p>");
+    const { stream, error } = await getCallMediaStream();
+    if (error) {
+      openModal(`<h3>Chamada de vídeo</h3><p class='muted'>Não consegui acessar câmera/microfone.</p><p class='muted' style="font-size:11px">${error}</p>`);
       rejectCall();
       return;
     }
