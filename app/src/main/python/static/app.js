@@ -85,7 +85,9 @@
   const callHangupBtn = document.getElementById("call-hangup-btn");
   const btnLive = document.getElementById("btn-live");
 
-  let callState = null; // {call_id, role, pc, localStream, peer:{id,ip,port,name}, pendingOffer?}
+  let callState = null; // {call_id, role, pc, localStream, peer:{id,name,via,ip?,port?}, pendingOffer?}
+  let myNodeId = null;
+  let seedHttpUrl = null;
 
   function callReset() {
     if (callState && callState.pc) {
@@ -132,8 +134,19 @@
     return pc;
   }
 
+  // Chamada local (mesma rede): fala direto com o ip:port do outro nó.
+  // Chamada à distância: os dois só se alcançam de dentro pra fora do
+  // nó-semente (mesmo truque do modo híbrido do chat) - fala com o
+  // /api/call/relay/* do nó-semente em vez de bater direto no outro
+  // celular, usando o node_id (peer.id) como endereço em vez de ip:port.
   async function callSignal(peer, path, body) {
-    const url = `http://${peer.ip}:${peer.port}/api/call/${path}`;
+    let url;
+    if (peer.via === "relay") {
+      url = `${seedHttpUrl}/api/call/relay/${path}`;
+      body = { ...body, to_id: peer.id };
+    } else {
+      url = `http://${peer.ip}:${peer.port}/api/call/${path}`;
+    }
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -151,29 +164,45 @@
       openModal("<h3>Chamada de vídeo</h3><p class='muted'>Não deu pra ver quem está na malha agora.</p>");
       return;
     }
+    myNodeId = data.node_id;
+    seedHttpUrl = data.seed_http;
+    const me = { node_id: data.node_id, my_ip: data.my_ip, my_port: data.my_port };
+
     // Nós-semente (bootstrap) não têm ninguém de verdade atendendo do outro
     // lado - ligar pra eles só ficaria chamando pra sempre sem resposta.
-    const peers = (data.peers || []).filter((p) => !p.id.startsWith("bootstrap-"));
+    const lanPeers = (data.peers || [])
+      .filter((p) => !p.id.startsWith("bootstrap-"))
+      .map((p) => ({ id: p.id, name: p.name || "Nó", via: "lan", ip: p.ip, port: p.port }));
+
+    let relayPeers = [];
+    try {
+      const res2 = await fetch(`${seedHttpUrl}/api/call/relay/who_is_online?my_id=${encodeURIComponent(myNodeId)}`);
+      const data2 = await res2.json();
+      relayPeers = (data2.online || []).map((p) => ({ id: p.id, name: p.name || "Nó", via: "relay" }));
+    } catch (e) {
+      // sem internet agora, ou nó-semente fora do ar - segue só com quem
+      // está na mesma rede, sem travar o resto da lista por causa disso.
+    }
+
+    const peers = [...lanPeers, ...relayPeers];
     if (peers.length === 0) {
-      openModal("<h3>Chamada de vídeo</h3><p class='muted'>Ninguém mais na malha agora pra chamar.</p>");
+      openModal("<h3>Chamada de vídeo</h3><p class='muted'>Ninguém pra chamar agora - nem na mesma rede, nem à distância.</p>");
       return;
     }
-    const myIp = data.my_ip;
-    const myPort = data.my_port;
     const rows = peers.map((p, i) => `
-      <button type="button" class="call-pick-btn" data-i="${i}">🎥 ${(p.name || "Nó desconhecido")}</button>
+      <button type="button" class="call-pick-btn" data-i="${i}">${p.via === "relay" ? "🌍" : "🎥"} ${p.name}${p.via === "relay" ? " <span class=\"muted\">(à distância)</span>" : ""}</button>
     `).join("");
     openModal(`<h3>Chamar quem?</h3><div class="call-pick-list">${rows}</div>`);
     modalContent.querySelectorAll(".call-pick-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
         const p = peers[Number(btn.dataset.i)];
         closeModal();
-        startCall({ id: p.id, ip: p.ip, port: p.port, name: p.name || "Nó" }, myIp, myPort);
+        startCall(p, me);
       });
     });
   }
 
-  async function startCall(peer, myIp, myPort) {
+  async function startCall(peer, me) {
     const callId = newCallId();
     let stream;
     try {
@@ -198,16 +227,67 @@
     try {
       await callSignal(peer, "offer", {
         call_id: callId,
-        from_id: senderId(),
+        from_id: me.node_id,
         from_name: myName() || "Alguém",
-        from_ip: myIp,
-        from_port: myPort,
+        from_ip: me.my_ip,
+        from_port: me.my_port,
         sdp: pc.localDescription,
       });
     } catch (e) {
       callStatusText.textContent = "Não consegui alcançar esse nó agora.";
       setTimeout(callReset, 2500);
     }
+  }
+
+  // ---------- presença + fila de eventos no nó-semente (chamada à distância) ----------
+  async function ensureMyIdentity() {
+    if (myNodeId && seedHttpUrl) return;
+    try {
+      const res = await fetch("/api/peers");
+      const data = await res.json();
+      myNodeId = data.node_id;
+      seedHttpUrl = data.seed_http;
+    } catch (e) {
+      // sem rede nenhuma agora - tenta de novo no próximo ciclo
+    }
+  }
+
+  async function callRelayHeartbeat() {
+    await ensureMyIdentity();
+    if (!myNodeId || !seedHttpUrl) return;
+    try {
+      await fetch(`${seedHttpUrl}/api/call/relay/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node_id: myNodeId, name: myName() || "Alguém" }),
+      });
+    } catch (e) {
+      // sem internet agora - a malha local continua funcionando normal
+    }
+  }
+
+  async function callRelayPoll() {
+    await ensureMyIdentity();
+    if (!myNodeId || !seedHttpUrl) return;
+    try {
+      const res = await fetch(`${seedHttpUrl}/api/call/relay/poll?my_id=${encodeURIComponent(myNodeId)}`);
+      const data = await res.json();
+      for (const ev of data.events || []) {
+        if (ev.kind === "incoming_call") handleIncomingCall(ev.data);
+        else if (ev.kind === "call_answered") handleCallAnswered(ev.data);
+        else if (ev.kind === "call_rejected") handleCallRejected(ev.data);
+        else if (ev.kind === "call_hangup") handleCallHangup(ev.data);
+      }
+    } catch (e) {
+      // sem internet agora
+    }
+  }
+
+  function startCallRelayLoop() {
+    callRelayHeartbeat();
+    callRelayPoll();
+    setInterval(callRelayHeartbeat, 5000);
+    setInterval(callRelayPoll, 2000);
   }
 
   function handleIncomingCall(data) {
@@ -220,7 +300,13 @@
       role: "callee",
       pc: null,
       localStream: null,
-      peer: { id: data.from_id, ip: data.from_ip, port: data.from_port, name: data.from_name || "Alguém" },
+      peer: {
+        id: data.from_id,
+        name: data.from_name || "Alguém",
+        via: data.via === "relay" ? "relay" : "lan",
+        ip: data.from_ip,
+        port: data.from_port,
+      },
       pendingOffer: data.sdp,
     };
     callScreen.classList.remove("hidden");
@@ -556,6 +642,7 @@
     connectSocket();
     pollPeers();
     setInterval(pollPeers, 5000);
+    startCallRelayLoop();
     renderTabs();
   }
 

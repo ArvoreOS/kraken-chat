@@ -89,6 +89,10 @@ MAX_GOSSIP_JSON_SIZE = 50 * 1024 * 1024
 # O próprio servidor rodando no Oracle sobe com KRAKEN_BOOTSTRAP_PEERS=""
 # pra não tentar ser semente de si mesmo.
 BOOTSTRAP_PEERS_RAW = os.environ.get("KRAKEN_BOOTSTRAP_PEERS", "136.248.100.20:8892")
+# Endereço HTTP do nó-semente pra chamada à distância (/api/call/relay/*
+# abaixo) - mesmo IP do BOOTSTRAP_PEERS_RAW, mas a porta HTTP (7000) é
+# diferente da porta de gossip (8892). Só existe 1 nó-semente hoje.
+SEED_HTTP_URL = os.environ.get("KRAKEN_SEED_HTTP_URL", "http://136.248.100.20:7000")
 
 try:
     # No Termux/desktop, BASE_DIR/data é sempre gravável. No Android/Chaquopy,
@@ -805,6 +809,7 @@ def api_peers():
         # ninguém de fora alcançar de volta.
         "my_ip": local_ip(),
         "my_port": HTTP_PORT,
+        "seed_http": SEED_HTTP_URL,
         "peers": [{"id": pid, **info} for pid, info in peers.items()],
     })
 
@@ -862,6 +867,121 @@ def api_call_hangup():
     data = request.get_json(force=True) or {}
     socketio.emit("call_hangup", data)
     return _cors(jsonify({"ok": True}))
+
+
+# ---------- chamada à distância, via nó-semente (relay) ----------
+# As rotas acima (/api/call/offer etc) só funcionam se os dois celulares se
+# alcançarem direto pelo IP local - não serve pra ligar de longe (ex: um no
+# 4G do trabalho, outro no WiFi de casa), porque não existe IP local nenhum
+# que sirva pros dois. Aqui embaixo é o mesmo princípio do modo híbrido do
+# chat (BOOTSTRAP_PEERS_RAW): cada celular já mantém contato de dentro pra
+# fora com o nó-semente (sempre online, sem NAT pra resolver) - então o
+# nó-semente vira o "correio" que os dois alcançam, mesmo sem se
+# alcançarem diretamente. Isso roda em QUALQUER nó (é o mesmo server.py),
+# mas só faz sentido de verdade em quem está hospedado como nó-semente de
+# internet - um celular comum também tem essas rotas, só que ninguém vai
+# bater nelas.
+_call_presence = {}       # node_id -> {"name":..., "last_seen": ts}
+_call_presence_lock = threading.Lock()
+_pending_relay_events = {}  # to_id -> [ {"kind":..., "data":{...}, "ts":...}, ... ]
+_pending_relay_lock = threading.Lock()
+_PRESENCE_TIMEOUT = 20      # celular manda heartbeat a cada 5s (ver app.js) - 20s de folga
+_RELAY_EVENT_TTL = 90       # se ninguém buscar em 90s, descarta (celular provavelmente fechou o app)
+
+
+def _prune_call_presence_loop():
+    while True:
+        time.sleep(10)
+        now = time.time()
+        with _call_presence_lock:
+            dead = [nid for nid, p in _call_presence.items() if now - p["last_seen"] > _PRESENCE_TIMEOUT]
+            for nid in dead:
+                del _call_presence[nid]
+        with _pending_relay_lock:
+            for to_id in list(_pending_relay_events.keys()):
+                fresh = [e for e in _pending_relay_events[to_id] if now - e["ts"] < _RELAY_EVENT_TTL]
+                if fresh:
+                    _pending_relay_events[to_id] = fresh
+                else:
+                    del _pending_relay_events[to_id]
+
+
+threading.Thread(target=_prune_call_presence_loop, daemon=True).start()
+
+
+@app.route("/api/call/relay/heartbeat", methods=["POST", "OPTIONS"])
+def api_call_relay_heartbeat():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    node_id = data.get("node_id")
+    if not node_id:
+        return _cors(jsonify({"error": "node_id obrigatório"})), 400
+    with _call_presence_lock:
+        _call_presence[node_id] = {"name": data.get("name") or "Alguém", "last_seen": time.time()}
+    return _cors(jsonify({"ok": True}))
+
+
+@app.route("/api/call/relay/who_is_online")
+def api_call_relay_who_is_online():
+    my_id = request.args.get("my_id", "")
+    with _call_presence_lock:
+        return _cors(jsonify({
+            "online": [{"id": nid, "name": p["name"]} for nid, p in _call_presence.items() if nid != my_id],
+        }))
+
+
+def _relay_push(kind):
+    data = request.get_json(force=True) or {}
+    to_id = data.get("to_id")
+    if not to_id:
+        return _cors(jsonify({"error": "to_id obrigatório"})), 400
+    # marca que esse evento veio pelo relay - o navegador que recebe usa
+    # isso pra saber que a resposta também precisa ir pelo relay (o
+    # from_ip/from_port do remetente é só o IP local dele, inútil pra
+    # alcançar de volta através da internet).
+    data["via"] = "relay"
+    with _pending_relay_lock:
+        _pending_relay_events.setdefault(to_id, []).append({"kind": kind, "data": data, "ts": time.time()})
+    return _cors(jsonify({"ok": True}))
+
+
+@app.route("/api/call/relay/offer", methods=["POST", "OPTIONS"])
+def api_call_relay_offer():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    return _relay_push("incoming_call")
+
+
+@app.route("/api/call/relay/answer", methods=["POST", "OPTIONS"])
+def api_call_relay_answer():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    return _relay_push("call_answered")
+
+
+@app.route("/api/call/relay/reject", methods=["POST", "OPTIONS"])
+def api_call_relay_reject():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    return _relay_push("call_rejected")
+
+
+@app.route("/api/call/relay/hangup", methods=["POST", "OPTIONS"])
+def api_call_relay_hangup():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    return _relay_push("call_hangup")
+
+
+@app.route("/api/call/relay/poll")
+def api_call_relay_poll():
+    my_id = request.args.get("my_id", "")
+    if not my_id:
+        return _cors(jsonify({"events": []}))
+    with _pending_relay_lock:
+        events = _pending_relay_events.pop(my_id, [])
+    return _cors(jsonify({"events": events}))
 
 
 @app.route("/api/send", methods=["POST"])
