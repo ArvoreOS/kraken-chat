@@ -799,6 +799,12 @@ def api_peers():
     peers = mesh.live_peers()
     return jsonify({
         "node_id": NODE_ID,
+        # my_ip/my_port: o nó precisa disso pra dizer aos outros peers onde
+        # mandar a resposta de uma chamada (ver /api/call/* abaixo) - no
+        # Android, a página roda em 127.0.0.1 (loopback), que não serve pra
+        # ninguém de fora alcançar de volta.
+        "my_ip": local_ip(),
+        "my_port": HTTP_PORT,
         "peers": [{"id": pid, **info} for pid, info in peers.items()],
     })
 
@@ -806,6 +812,56 @@ def api_peers():
 @app.route("/api/known_nodes")
 def api_known_nodes():
     return jsonify(store.list_known_nodes())
+
+
+# ---------- chamada de vídeo P2P (WebRTC) ----------
+# O servidor não entende nada de vídeo/áudio - só repassa a "sinalização"
+# (oferta/resposta SDP) entre os dois navegadores, que negociam e trocam
+# mídia diretamente entre si (peer-to-peer), sem passar pelo servidor.
+# Cada nó chama a rota do OUTRO nó direto pelo ip:port já conhecido da
+# malha (mesmo padrão de _fetch_file_http) - por isso precisa de CORS
+# aqui, já que é sempre um pedido de origem diferente (outro ip:port).
+def _cors(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
+
+
+@app.route("/api/call/offer", methods=["POST", "OPTIONS"])
+def api_call_offer():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    socketio.emit("incoming_call", data)
+    return _cors(jsonify({"ok": True}))
+
+
+@app.route("/api/call/answer", methods=["POST", "OPTIONS"])
+def api_call_answer():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    socketio.emit("call_answered", data)
+    return _cors(jsonify({"ok": True}))
+
+
+@app.route("/api/call/reject", methods=["POST", "OPTIONS"])
+def api_call_reject():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    socketio.emit("call_rejected", data)
+    return _cors(jsonify({"ok": True}))
+
+
+@app.route("/api/call/hangup", methods=["POST", "OPTIONS"])
+def api_call_hangup():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    socketio.emit("call_hangup", data)
+    return _cors(jsonify({"ok": True}))
 
 
 @app.route("/api/send", methods=["POST"])

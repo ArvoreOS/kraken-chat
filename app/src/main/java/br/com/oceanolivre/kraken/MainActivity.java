@@ -68,13 +68,19 @@ public class MainActivity extends Activity {
             public void onPermissionRequest(final PermissionRequest request) {
                 // O WebView tem seu próprio modelo de permissão pra APIs web
                 // (getUserMedia) além da permissão normal do Android - sem
-                // liberar aqui, o gravador de áudio do chat nunca consegue
-                // acessar o microfone mesmo com RECORD_AUDIO concedido.
+                // liberar aqui, o gravador de áudio/câmera do chat nunca
+                // consegue acessar o hardware mesmo com a permissão do
+                // Android concedida.
                 runOnUiThread(() -> {
                     List<String> granted = new ArrayList<>();
                     for (String resource : request.getResources()) {
                         if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)
                                 && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.RECORD_AUDIO)
+                                        == PackageManager.PERMISSION_GRANTED) {
+                            granted.add(resource);
+                        }
+                        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(resource)
+                                && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA)
                                         == PackageManager.PERMISSION_GRANTED) {
                             granted.add(resource);
                         }
@@ -90,6 +96,7 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new WebViewClient());
 
         requestAudioPermissionIfNeeded();
+        requestCameraPermissionIfNeeded();
 
         Intent serviceIntent = new Intent(this, KrakenService.class);
         ContextCompat.startForegroundService(this, serviceIntent);
@@ -99,11 +106,19 @@ public class MainActivity extends Activity {
     }
 
     private static final int AUDIO_PERMISSION_REQUEST = 4211;
+    private static final int CAMERA_PERMISSION_REQUEST = 4212;
 
     private void requestAudioPermissionIfNeeded() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, AUDIO_PERMISSION_REQUEST);
+        }
+    }
+
+    private void requestCameraPermissionIfNeeded() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
         }
     }
 

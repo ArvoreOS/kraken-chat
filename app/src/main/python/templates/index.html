@@ -33,6 +33,7 @@
       <span id="status-text">conectando…</span>
     </div>
     <a href="/debug" class="btn amarelo small" title="Diagnóstico">🩺</a>
+    <button type="button" id="btn-live" class="btn roxo small" title="Chamada de vídeo">🎥</button>
     <a href="/join" target="_blank" class="btn roxo small">+ Convidar</a>
   </header>
 
@@ -64,6 +65,17 @@
 
 <div id="modal-overlay" class="modal-overlay hidden">
   <div class="modal" id="modal-content"></div>
+</div>
+
+<div id="call-screen" class="call-screen hidden">
+  <video id="call-remote-video" class="call-remote-video" autoplay playsinline></video>
+  <video id="call-local-video" class="call-local-video" autoplay playsinline muted></video>
+  <div class="call-status" id="call-status-text"></div>
+  <div class="call-controls">
+    <button type="button" id="call-accept-btn" class="call-btn call-accept hidden">✅ Atender</button>
+    <button type="button" id="call-reject-btn" class="call-btn call-reject hidden">✕ Recusar</button>
+    <button type="button" id="call-hangup-btn" class="call-btn call-hangup hidden">📵 Encerrar</button>
+  </div>
 </div>
 
 <script src="/static/socket.io.min.js"></script>

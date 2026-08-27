@@ -69,6 +69,237 @@
     if (e.target === modalOverlay) closeModal();
   });
 
+  // ---------- chamada de vídeo (WebRTC P2P) ----------
+  // O servidor só repassa a "sinalização" (oferta/resposta SDP) - o vídeo
+  // em si nunca passa por ele, vai direto de celular pra celular. Sem ICE
+  // "trickle": espera juntar os candidatos ANTES de mandar a oferta/
+  // resposta, pra não precisar de um segundo canal de tempo real só pra
+  // isso - mais simples, custa só um pouco de atraso na hora de conectar.
+  const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+  const callScreen = document.getElementById("call-screen");
+  const callRemoteVideo = document.getElementById("call-remote-video");
+  const callLocalVideo = document.getElementById("call-local-video");
+  const callStatusText = document.getElementById("call-status-text");
+  const callAcceptBtn = document.getElementById("call-accept-btn");
+  const callRejectBtn = document.getElementById("call-reject-btn");
+  const callHangupBtn = document.getElementById("call-hangup-btn");
+  const btnLive = document.getElementById("btn-live");
+
+  let callState = null; // {call_id, role, pc, localStream, peer:{id,ip,port,name}, pendingOffer?}
+
+  function callReset() {
+    if (callState && callState.pc) {
+      try { callState.pc.close(); } catch (e) {}
+    }
+    if (callState && callState.localStream) {
+      callState.localStream.getTracks().forEach((t) => t.stop());
+    }
+    callState = null;
+    callScreen.classList.add("hidden");
+    callRemoteVideo.srcObject = null;
+    callLocalVideo.srcObject = null;
+    callAcceptBtn.classList.add("hidden");
+    callRejectBtn.classList.add("hidden");
+    callHangupBtn.classList.add("hidden");
+  }
+
+  function newCallId() {
+    return "call-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+  }
+
+  function waitIceGatheringComplete(pc) {
+    if (pc.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise((resolve) => {
+      function check() {
+        if (pc.iceGatheringState === "complete") {
+          pc.removeEventListener("icegatheringstatechange", check);
+          resolve();
+        }
+      }
+      pc.addEventListener("icegatheringstatechange", check);
+      // segurança: nunca trava esperando ICE pra sempre - depois de 3s
+      // manda o que já tiver (ainda costuma funcionar, só com menos
+      // candidatos pra tentar).
+      setTimeout(resolve, 3000);
+    });
+  }
+
+  function makePeerConnection() {
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pc.ontrack = (e) => {
+      callRemoteVideo.srcObject = e.streams[0];
+    };
+    return pc;
+  }
+
+  async function callSignal(peer, path, body) {
+    const url = `http://${peer.ip}:${peer.port}/api/call/${path}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error("resposta " + res.status);
+  }
+
+  async function openPeerPicker() {
+    let data;
+    try {
+      const res = await fetch("/api/peers");
+      data = await res.json();
+    } catch (e) {
+      openModal("<h3>Chamada de vídeo</h3><p class='muted'>Não deu pra ver quem está na malha agora.</p>");
+      return;
+    }
+    // Nós-semente (bootstrap) não têm ninguém de verdade atendendo do outro
+    // lado - ligar pra eles só ficaria chamando pra sempre sem resposta.
+    const peers = (data.peers || []).filter((p) => !p.id.startsWith("bootstrap-"));
+    if (peers.length === 0) {
+      openModal("<h3>Chamada de vídeo</h3><p class='muted'>Ninguém mais na malha agora pra chamar.</p>");
+      return;
+    }
+    const myIp = data.my_ip;
+    const myPort = data.my_port;
+    const rows = peers.map((p, i) => `
+      <button type="button" class="call-pick-btn" data-i="${i}">🎥 ${(p.name || "Nó desconhecido")}</button>
+    `).join("");
+    openModal(`<h3>Chamar quem?</h3><div class="call-pick-list">${rows}</div>`);
+    modalContent.querySelectorAll(".call-pick-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const p = peers[Number(btn.dataset.i)];
+        closeModal();
+        startCall({ id: p.id, ip: p.ip, port: p.port, name: p.name || "Nó" }, myIp, myPort);
+      });
+    });
+  }
+
+  async function startCall(peer, myIp, myPort) {
+    const callId = newCallId();
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch (e) {
+      openModal("<h3>Chamada de vídeo</h3><p class='muted'>Não consegui acessar câmera/microfone. Confere a permissão do app.</p>");
+      return;
+    }
+    const pc = makePeerConnection();
+    stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+    callState = { call_id: callId, role: "caller", pc, localStream: stream, peer };
+
+    callScreen.classList.remove("hidden");
+    callLocalVideo.srcObject = stream;
+    callStatusText.textContent = `Chamando ${peer.name}…`;
+    callHangupBtn.classList.remove("hidden");
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitIceGatheringComplete(pc);
+
+    try {
+      await callSignal(peer, "offer", {
+        call_id: callId,
+        from_id: senderId(),
+        from_name: myName() || "Alguém",
+        from_ip: myIp,
+        from_port: myPort,
+        sdp: pc.localDescription,
+      });
+    } catch (e) {
+      callStatusText.textContent = "Não consegui alcançar esse nó agora.";
+      setTimeout(callReset, 2500);
+    }
+  }
+
+  function handleIncomingCall(data) {
+    // Já tem uma chamada rolando (ligando ou recebendo outra) - recusa a
+    // nova sem perguntar. Simples de propósito: sem "chamada em espera"
+    // nessa primeira versão.
+    if (callState) return;
+    callState = {
+      call_id: data.call_id,
+      role: "callee",
+      pc: null,
+      localStream: null,
+      peer: { id: data.from_id, ip: data.from_ip, port: data.from_port, name: data.from_name || "Alguém" },
+      pendingOffer: data.sdp,
+    };
+    callScreen.classList.remove("hidden");
+    callStatusText.textContent = `${callState.peer.name} está te chamando…`;
+    callAcceptBtn.classList.remove("hidden");
+    callRejectBtn.classList.remove("hidden");
+  }
+
+  async function acceptCall() {
+    if (!callState || !callState.pendingOffer) return;
+    const { call_id, peer, pendingOffer } = callState;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch (e) {
+      openModal("<h3>Chamada de vídeo</h3><p class='muted'>Não consegui acessar câmera/microfone. Confere a permissão do app.</p>");
+      rejectCall();
+      return;
+    }
+    const pc = makePeerConnection();
+    stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+    callState.pc = pc;
+    callState.localStream = stream;
+    callLocalVideo.srcObject = stream;
+    callAcceptBtn.classList.add("hidden");
+    callRejectBtn.classList.add("hidden");
+    callHangupBtn.classList.remove("hidden");
+    callStatusText.textContent = `Em chamada com ${peer.name}`;
+
+    await pc.setRemoteDescription(pendingOffer);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await waitIceGatheringComplete(pc);
+
+    try {
+      await callSignal(peer, "answer", { call_id, sdp: pc.localDescription });
+    } catch (e) {
+      callStatusText.textContent = "Não consegui responder - conexão falhou.";
+      setTimeout(callReset, 2500);
+    }
+  }
+
+  async function rejectCall() {
+    if (!callState) return;
+    const { call_id, peer } = callState;
+    try { await callSignal(peer, "reject", { call_id }); } catch (e) {}
+    callReset();
+  }
+
+  async function hangupCall() {
+    if (!callState) return;
+    const { call_id, peer } = callState;
+    try { await callSignal(peer, "hangup", { call_id }); } catch (e) {}
+    callReset();
+  }
+
+  async function handleCallAnswered(data) {
+    if (!callState || callState.call_id !== data.call_id || !callState.pc) return;
+    await callState.pc.setRemoteDescription(data.sdp);
+    callStatusText.textContent = `Em chamada com ${callState.peer.name}`;
+  }
+
+  function handleCallRejected(data) {
+    if (!callState || callState.call_id !== data.call_id) return;
+    callStatusText.textContent = "Chamada recusada.";
+    setTimeout(callReset, 1500);
+  }
+
+  function handleCallHangup(data) {
+    if (!callState || callState.call_id !== data.call_id) return;
+    callStatusText.textContent = "A pessoa encerrou a chamada.";
+    setTimeout(callReset, 1500);
+  }
+
+  btnLive.addEventListener("click", openPeerPicker);
+  callAcceptBtn.addEventListener("click", acceptCall);
+  callRejectBtn.addEventListener("click", rejectCall);
+  callHangupBtn.addEventListener("click", hangupCall);
+
   // ---------- convite de grupo (token colável) ----------
   function encodeInvite(invite) {
     return "kraken-group:" + btoa(unescape(encodeURIComponent(JSON.stringify(invite))));
@@ -360,6 +591,10 @@
     socket.on("new_message", (msg) => {
       addMessage(msg);
     });
+    socket.on("incoming_call", (data) => handleIncomingCall(data));
+    socket.on("call_answered", (data) => handleCallAnswered(data));
+    socket.on("call_rejected", (data) => handleCallRejected(data));
+    socket.on("call_hangup", (data) => handleCallHangup(data));
   }
 
   async function pollPeers() {

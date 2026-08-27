@@ -295,4 +295,77 @@ body {
   cursor: pointer;
   font-size: 14.5px;
 }
+
+/* ---------- lista de "quem chamar" (dentro do modal genérico) ---------- */
+.call-pick-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.call-pick-btn {
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 2px solid var(--borda);
+  background: #fff;
+  text-align: left;
+  font-size: 15px;
+  cursor: pointer;
+}
+.call-pick-btn:active { background: #f5f0fb; border-color: var(--roxo); }
+
+/* ---------- chamada de vídeo ---------- */
+.call-screen {
+  position: fixed;
+  inset: 0;
+  background: #101014;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.call-remote-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #101014;
+}
+.call-local-video {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  right: 16px;
+  width: 110px;
+  height: 150px;
+  object-fit: cover;
+  border-radius: 14px;
+  border: 2px solid rgba(255,255,255,.4);
+  background: #000;
+}
+.call-status {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  left: 16px;
+  right: 140px;
+  color: #fff;
+  font-size: 15px;
+  text-shadow: 0 1px 4px rgba(0,0,0,.6);
+}
+.call-controls {
+  position: absolute;
+  bottom: max(28px, env(safe-area-inset-bottom));
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+}
+.call-btn {
+  padding: 14px 22px;
+  border-radius: 999px;
+  border: none;
+  font-size: 15px;
+  font-weight: bold;
+  cursor: pointer;
+  color: #fff;
+}
+.call-btn.call-accept { background: var(--verde); }
+.call-btn.call-reject, .call-btn.call-hangup { background: #E63946; }
 .modal-list-item:hover { background: var(--bg-bubble-other); }
