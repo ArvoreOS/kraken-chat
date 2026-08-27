@@ -25,30 +25,75 @@ body {
 .amarelo { color: var(--amarelo); }
 .verde { color: var(--verde); }
 
-/* ---------- tela de nome ---------- */
-#name-screen {
+/* ---------- tela de login (mesmo visual do site arvoreos.github.io/kraken-chat) ---------- */
+.login-screen {
   height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
+  overflow-y: auto;
   text-align: center;
-  background: linear-gradient(180deg, #ffffff 0%, #fbfaff 100%);
+  background: radial-gradient(circle at 50% 0%, #170f2b, #0f0a1a 65%);
+  color: #f4f0ff;
 }
-.logo-big { margin-bottom: 8px; }
-#name-screen h1 { margin: 4px 0; font-size: 28px; }
-.subtitle { color: #777; margin-bottom: 24px; max-width: 320px; }
-#name-input {
-  width: 100%; max-width: 300px;
+.login-hero {
+  position: relative;
+  width: 100%;
+  height: 34vh;
+  min-height: 220px;
+  max-height: 320px;
+  overflow: hidden;
+}
+.login-hero img {
+  width: 100%; height: 100%; object-fit: cover; object-position: center 38%; display: block;
+}
+.login-hero .login-fade {
+  position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(15,10,26,.05) 0%, rgba(15,10,26,.35) 55%, #0f0a1a 96%);
+}
+.login-content {
+  position: relative;
+  margin-top: -40px;
+  padding: 0 24px 32px;
+}
+.login-content h1 { margin: 4px 0; font-size: 30px; text-shadow: 0 4px 18px rgba(0,0,0,.6); }
+.login-roxo { color: #c9a3f7; }
+.login-tagline { color: #b8adcf; font-size: 14.5px; max-width: 320px; margin: 0 auto 22px; line-height: 1.5; }
+.login-form {
+  display: flex; flex-direction: column; gap: 12px;
+  max-width: 320px; margin: 0 auto;
+}
+.login-form input {
+  width: 100%;
   padding: 14px 16px;
   border-radius: 14px;
-  border: 2px solid var(--borda);
-  font-size: 16px;
-  margin-bottom: 14px;
+  border: 2px solid #3a2c5c;
+  background: #1c1433;
+  color: #f4f0ff;
+  font-size: 15px;
   text-align: center;
 }
-#name-input:focus { outline: none; border-color: var(--verde); }
+.login-form input::placeholder { color: #8579a3; }
+.login-form input:focus { outline: none; border-color: #c9a3f7; }
+.login-error { color: #ff8fa3; font-size: 13.5px; margin: -2px 0 0; }
+.login-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 15px 20px;
+  font-size: 16px;
+  font-weight: 800;
+  cursor: pointer;
+  background: linear-gradient(135deg, #00A651, #00c463);
+  color: #04170a;
+  box-shadow: 0 12px 26px -8px rgba(0,166,81,.55);
+}
+.login-toggle {
+  display: block;
+  margin: 18px auto 0;
+  background: none;
+  border: none;
+  color: #c9a3f7;
+  font-size: 13.5px;
+  text-decoration: underline;
+  cursor: pointer;
+}
 
 .btn {
   border: none;

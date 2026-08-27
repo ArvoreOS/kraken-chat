@@ -4,8 +4,14 @@
 
   const nameScreen = document.getElementById("name-screen");
   const chatScreen = document.getElementById("chat-screen");
-  const nameInput = document.getElementById("name-input");
-  const nameSubmit = document.getElementById("name-submit");
+  const loginForm = document.getElementById("login-form");
+  const loginEmail = document.getElementById("login-email");
+  const loginPassword = document.getElementById("login-password");
+  const loginName = document.getElementById("login-name");
+  const loginError = document.getElementById("login-error");
+  const loginSubmit = document.getElementById("login-submit");
+  const loginToggleMode = document.getElementById("login-toggle-mode");
+  const loginTagline = document.getElementById("login-tagline");
   const messagesEl = document.getElementById("messages");
   const sendForm = document.getElementById("send-form");
   const textInput = document.getElementById("text-input");
@@ -646,14 +652,80 @@
     renderTabs();
   }
 
-  nameSubmit.addEventListener("click", () => {
-    const v = nameInput.value.trim();
-    if (!v) return;
-    localStorage.setItem(STORAGE_NAME, v);
-    showChat();
+  // ---------- login / criar conta ----------
+  // Só funciona com internet (bate no nó-semente, única "autoridade" que
+  // existe pra verificar senha) - mas isso é só na 1ª vez. Depois de
+  // logar uma vez, o nome fica salvo local e o app volta a funcionar
+  // 100% offline como sempre funcionou (ver "inicialização" no fim do
+  // arquivo: só mostra essa tela se ainda não tiver nome salvo).
+  let loginMode = "login"; // "login" | "register"
+
+  function setLoginMode(mode) {
+    loginMode = mode;
+    if (mode === "register") {
+      loginName.classList.remove("hidden");
+      loginPassword.setAttribute("autocomplete", "new-password");
+      loginSubmit.textContent = "Criar conta";
+      loginTagline.textContent = "Cria sua conta pra continuar";
+      loginToggleMode.textContent = "Já tem conta? Entrar";
+    } else {
+      loginName.classList.add("hidden");
+      loginPassword.setAttribute("autocomplete", "current-password");
+      loginSubmit.textContent = "Entrar";
+      loginTagline.textContent = "Entre com sua conta pra continuar";
+      loginToggleMode.textContent = "Não tem conta? Criar agora";
+    }
+    loginError.classList.add("hidden");
+  }
+
+  loginToggleMode.addEventListener("click", () => {
+    setLoginMode(loginMode === "login" ? "register" : "login");
   });
-  nameInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") nameSubmit.click();
+
+  loginForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    loginError.classList.add("hidden");
+    const email = loginEmail.value.trim();
+    const password = loginPassword.value;
+    const name = loginName.value.trim();
+    if (loginMode === "register" && !name) {
+      loginError.textContent = "Escreve como quer ser chamado.";
+      loginError.classList.remove("hidden");
+      return;
+    }
+    loginSubmit.disabled = true;
+    const textoOriginal = loginSubmit.textContent;
+    loginSubmit.textContent = "Um momento…";
+    try {
+      // /api/peers é sempre local (funciona sem internet) - só usado aqui
+      // pra descobrir o endereço do nó-semente antes de tentar de verdade.
+      const peersRes = await fetch("/api/peers");
+      const peersData = await peersRes.json();
+      seedHttpUrl = peersData.seed_http;
+      myNodeId = peersData.node_id;
+
+      const path = loginMode === "register" ? "register" : "login";
+      const body = loginMode === "register" ? { email, password, name } : { email, password };
+      const res = await fetch(`${seedHttpUrl}/api/auth/${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        loginError.textContent = data.error || "Não deu certo. Tenta de novo.";
+        loginError.classList.remove("hidden");
+        return;
+      }
+      localStorage.setItem(STORAGE_NAME, data.name);
+      showChat();
+    } catch (e) {
+      loginError.textContent = "Precisa de internet pra entrar (ou criar conta) pela primeira vez.";
+      loginError.classList.remove("hidden");
+    } finally {
+      loginSubmit.disabled = false;
+      loginSubmit.textContent = textoOriginal;
+    }
   });
 
   async function loadHistory() {
@@ -869,6 +941,7 @@
   if (myName()) {
     showChat();
   } else {
+    setLoginMode("login");
     nameScreen.classList.remove("hidden");
   }
   if (demoName) {

@@ -43,6 +43,7 @@ import nacl.secret
 import nacl.utils
 from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 from flask_socketio import SocketIO
+from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -341,6 +342,19 @@ class Store:
                 PRIMARY KEY (group_id, node_id)
             )
         """)
+        # Contas (login) - só faz sentido de verdade em quem for nó-semente
+        # de internet (é o único lugar "sempre online" pra verificar senha).
+        # Um celular comum também cria essa tabela (é o mesmo server.py),
+        # mas fica vazia/sem uso - login sempre bate no nó-semente via
+        # SEED_HTTP_URL, nunca no próprio celular.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS accounts (
+                email TEXT PRIMARY KEY,
+                password_hash TEXT,
+                name TEXT,
+                created_ts REAL
+            )
+        """)
         conn.commit()
         conn.close()
 
@@ -436,6 +450,26 @@ class Store:
             "SELECT node_id, name, last_seen FROM known_nodes ORDER BY last_seen DESC"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---------- contas (login) ----------
+    def create_account(self, email, password_hash, name):
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT INTO accounts (email, password_hash, name, created_ts) VALUES (?,?,?,?)",
+                (email, password_hash, name, time.time()),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False  # e-mail já cadastrado
+
+    def get_account(self, email):
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT email, password_hash, name FROM accounts WHERE email=?", (email,)
+        ).fetchone()
+        return dict(row) if row else None
 
     # ---------- grupos ----------
     def create_group(self, group_id, name, kind, key):
@@ -817,6 +851,50 @@ def api_peers():
 @app.route("/api/known_nodes")
 def api_known_nodes():
     return jsonify(store.list_known_nodes())
+
+
+# ---------- contas (login com e-mail/senha) ----------
+# Só funciona de verdade contra o nó-semente (única "autoridade sempre
+# online" que existe hoje) - o cliente sempre bate nessas rotas via
+# SEED_HTTP_URL, nunca no próprio celular. Depois do 1º login com
+# internet, o nome da conta fica salvo local (localStorage) e o app volta
+# a funcionar 100% offline como sempre funcionou - login não é exigido de
+# novo pra continuar usando o chat da malha local.
+import re as _re
+_EMAIL_RE = _re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+@app.route("/api/auth/register", methods=["POST", "OPTIONS"])
+def api_auth_register():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    name = (data.get("name") or "").strip()
+    if not _EMAIL_RE.match(email):
+        return _cors(jsonify({"ok": False, "error": "e-mail inválido"})), 400
+    if len(password) < 6:
+        return _cors(jsonify({"ok": False, "error": "senha precisa de pelo menos 6 caracteres"})), 400
+    if not name:
+        return _cors(jsonify({"ok": False, "error": "nome obrigatório"})), 400
+    ok = store.create_account(email, generate_password_hash(password), name)
+    if not ok:
+        return _cors(jsonify({"ok": False, "error": "esse e-mail já tem conta"})), 409
+    return _cors(jsonify({"ok": True, "name": name}))
+
+
+@app.route("/api/auth/login", methods=["POST", "OPTIONS"])
+def api_auth_login():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    account = store.get_account(email)
+    if not account or not check_password_hash(account["password_hash"], password):
+        return _cors(jsonify({"ok": False, "error": "e-mail ou senha incorretos"})), 401
+    return _cors(jsonify({"ok": True, "name": account["name"]}))
 
 
 # ---------- chamada de vídeo P2P (WebRTC) ----------

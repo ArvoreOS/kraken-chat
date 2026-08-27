@@ -12,14 +12,25 @@
 </head>
 <body>
 
-<div id="name-screen" class="screen">
-  <div class="logo-big">
-    <img src="/static/icons/icon-512.png" width="120" height="120" alt="Kraken">
+<div id="name-screen" class="screen login-screen">
+  <div class="login-hero">
+    <img src="/static/icons/kraken-hero.jpg" alt="Kraken">
+    <div class="login-fade"></div>
   </div>
-  <h1><span class="roxo">Kraken</span></h1>
-  <p class="subtitle">Chat offline em malha — sem internet, sem servidor central.</p>
-  <input id="name-input" maxlength="24" placeholder="Como quer ser chamado?">
-  <button id="name-submit" class="btn verde">Entrar na conversa</button>
+  <div class="login-content">
+    <h1>🐙 <span class="login-roxo">Kraken</span></h1>
+    <p class="login-tagline" id="login-tagline">Entre com sua conta pra continuar</p>
+
+    <form id="login-form" class="login-form">
+      <input type="email" id="login-email" placeholder="E-mail" autocomplete="email" required>
+      <input type="password" id="login-password" placeholder="Senha" autocomplete="current-password" required>
+      <input type="text" id="login-name" maxlength="24" placeholder="Como quer ser chamado?" class="hidden">
+      <p class="login-error hidden" id="login-error"></p>
+      <button type="submit" id="login-submit" class="login-btn">Entrar</button>
+    </form>
+
+    <button type="button" id="login-toggle-mode" class="login-toggle">Não tem conta? Criar agora</button>
+  </div>
 </div>
 
 <div id="chat-screen" class="screen hidden">

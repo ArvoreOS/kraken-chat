@@ -11,8 +11,8 @@ android {
         applicationId "br.com.oceanolivre.kraken"
         minSdk 24
         targetSdk 34
-        versionCode 14
-        versionName "1.5.1"
+        versionCode 15
+        versionName "1.6.0"
 
         ndk {
             abiFilters "arm64-v8a"
@@ -45,6 +45,7 @@ chaquopy {
         buildPython("C:/Users/Usuario/AppData/Local/Programs/Python/Python312/python.exe")
         pip {
             install "flask"
+            install "werkzeug"
             install "flask-socketio"
             install "simple-websocket"
             install "qrcode"
