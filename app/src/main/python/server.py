@@ -1338,6 +1338,108 @@ def get_file_view(msg_id):
     return resp
 
 
+# Assinaturas de arquivo (magic bytes) conhecidas o suficiente pra separar os
+# formatos de áudio prováveis de sair do gravador nativo do Android.
+_MAGIC_SIGNATURES = [
+    (4, b"ftyp", "MP4/M4A/3GP (container ISO-BMFF - pode ser AAC, mas também pode ser AMR dentro de um 3GP)"),
+    (0, b"#!AMR\n", "AMR-NB puro (áudio de telefone antigo, baixíssima qualidade - Chrome/WebView geralmente NÃO reproduz isso)"),
+    (0, b"RIFF", "WAV"),
+    (0, b"OggS", "OGG (provavelmente Opus)"),
+    (0, b"ID3", "MP3 (com tag ID3)"),
+    (0, b"\xff\xfb", "MP3 (sem tag ID3)"),
+]
+
+
+def _identificar_formato(data: bytes) -> str:
+    for offset, assinatura, nome in _MAGIC_SIGNATURES:
+        if data[offset:offset + len(assinatura)] == assinatura:
+            return nome
+    return "desconhecido"
+
+
+@app.route("/debug/audio/<msg_id>")
+def debug_audio(msg_id):
+    """Diagnóstico direto do arquivo de áudio armazenado - sem precisar
+    exportar/baixar nada. Achado real 2026-08-29: pedir pro Gilcimar tirar
+    o arquivo do celular (pasta Música, depois o link de baixar do v27)
+    falhou 2x seguidas (armazenamento privado do app, sem gerenciador de
+    arquivo comum enxergando). Em vez de continuar chutando teoria sobre o
+    código sem nunca ver o arquivo real, essa rota lê os primeiros bytes
+    (assinatura/magic number) direto do storage do próprio app e devolve
+    como texto simples - só precisa abrir o link, sem download nenhum."""
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM messages WHERE id=? AND kind='audio'", (msg_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return Response(f"Mensagem {msg_id} não encontrada (ou não é áudio).", mimetype="text/plain"), 404
+    row = dict(row)
+    local_path = FILES_DIR / f"{msg_id}_{row['file_name']}"
+    if not local_path.exists():
+        return Response(f"Arquivo não existe em disco: {local_path}", mimetype="text/plain"), 404
+    data = local_path.read_bytes()
+    if row.get("encrypted"):
+        data = _decrypt_for_scope(data, row)
+        if data is None:
+            return Response("Sem permissão pra decifrar esse arquivo.", mimetype="text/plain"), 403
+    mime_guess = mimetypes.guess_type(row["file_name"])[0] or "application/octet-stream"
+    formato = _identificar_formato(data)
+    ascii_preview = "".join(chr(b) if 32 <= b < 127 else "." for b in data[:32])
+    return Response(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>Kraken — Diagnóstico de áudio</title></head>"
+        "<body style='font-family:sans-serif;padding:16px;font-size:14px'>"
+        "<h3>🔍 Diagnóstico de áudio</h3>"
+        "<table style='border-collapse:collapse;width:100%'>"
+        f"<tr><td style='padding:4px;color:#888'>arquivo</td><td style='padding:4px'>{row['file_name']}</td></tr>"
+        f"<tr><td style='padding:4px;color:#888'>tamanho</td><td style='padding:4px'>{len(data)} bytes</td></tr>"
+        f"<tr><td style='padding:4px;color:#888'>mimetype pelo nome</td><td style='padding:4px'>{mime_guess}</td></tr>"
+        f"<tr><td style='padding:4px;color:#888;font-weight:700'>formato real</td>"
+        f"<td style='padding:4px;font-weight:700;color:#7B2CBF'>{formato}</td></tr>"
+        "</table>"
+        f"<p style='color:#888'>primeiros 32 bytes (hex):</p>"
+        f"<p style='font-family:monospace;word-break:break-all;background:#f5f2fa;padding:8px;border-radius:6px'>{data[:32].hex()}</p>"
+        f"<p style='color:#888'>primeiros 32 bytes (texto, ilegível vira '.'):</p>"
+        f"<p style='font-family:monospace;word-break:break-all;background:#f5f2fa;padding:8px;border-radius:6px'>{ascii_preview}</p>"
+        "<p><a href='/debug/audio' style='color:#7B2CBF'>← Voltar</a></p>"
+        "</body></html>",
+        mimetype="text/html",
+    )
+
+
+@app.route("/debug/audio")
+def debug_audio_list():
+    """Lista as últimas mensagens de áudio com link direto pro diagnóstico
+    de cada uma - pra não precisar catar msg_id na mão."""
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, sender_name, ts, file_name FROM messages WHERE kind='audio' ORDER BY ts DESC LIMIT 20"
+    ).fetchall()
+    conn.close()
+    linhas = "".join(
+        f'<li style="margin-bottom:10px"><a href="/debug/audio/{r["id"]}" '
+        f'style="color:#7B2CBF;font-weight:600">{r["file_name"]}</a><br>'
+        f'<span style="color:#888;font-size:12px">{r["sender_name"]} — '
+        f'{time.strftime("%d/%m %H:%M:%S", time.localtime(r["ts"]))}</span></li>'
+        for r in rows
+    )
+    return Response(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>Kraken — Áudios</title></head>"
+        "<body style='font-family:sans-serif;padding:16px'>"
+        "<h3>🔍 Áudios recentes</h3>"
+        f"<ul style='list-style:none;padding:0'>{linhas or '<li>Nenhum áudio ainda.</li>'}</ul>"
+        "<p><a href='/debug' style='color:#7B2CBF'>← Voltar</a></p>"
+        "</body></html>",
+        mimetype="text/html",
+    )
+
+
 _LOGO_DATA_URI = None
 
 
@@ -1415,6 +1517,11 @@ def debug_page():
       <tr><th>Nome</th><th>ID</th><th>Visto por último</th></tr>
       {known_rows if known_rows else '<tr><td colspan="3">Nenhum ainda.</td></tr>'}
     </table>
+
+    <h2>Diagnóstico de áudio</h2>
+    <p>Lê o formato real (magic bytes) de cada mensagem de voz gravada, direto do
+    storage do app — sem precisar exportar/baixar arquivo nenhum.</p>
+    <p><a class="btn" href="/debug/audio">🔍 Ver áudios gravados</a></p>
 
     <p><a class="btn" href="/">← Voltar pro chat</a></p>
     </body></html>"""
