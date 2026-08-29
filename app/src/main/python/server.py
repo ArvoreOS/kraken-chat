@@ -1275,7 +1275,15 @@ def get_file(msg_id):
     local_path = FILES_DIR / f"{msg_id}_{row['file_name']}"
     if not local_path.exists():
         abort(404)
-    mime = mimetypes.guess_type(row["file_name"])[0] or "application/octet-stream"
+    # Só espia os primeiros bytes pra detectar o formato real (ver
+    # _mime_real) - não lê o arquivo inteiro pra memória, já que aqui pode
+    # ser um anexo grande, não só áudio. Se for cifrado, os bytes crus são
+    # o texto cifrado mesmo (esta rota nunca decifra, de propósito) - não
+    # bate com nenhuma assinatura conhecida, cai no guess pelo nome como
+    # antes, sem problema.
+    with open(local_path, "rb") as f:
+        preview = f.read(16)
+    mime = _mime_real(preview, row["file_name"])
     return send_file(local_path, mimetype=mime, download_name=row["file_name"])
 
 
@@ -1311,7 +1319,15 @@ def get_file_view(msg_id):
         data = _decrypt_for_scope(data, row)
         if data is None:
             abort(403)
-    mime = mimetypes.guess_type(row["file_name"])[0] or "application/octet-stream"
+    # Achado real 2026-08-29: não confiar na extensão do nome do arquivo
+    # pra decidir o Content-Type - o gravador nativo do Android nomeia
+    # .m4a um áudio que na verdade é AAC cru em ADTS (sem container MP4
+    # nenhum). mimetypes.guess_type(".m4a") nem reconhecia a extensão
+    # nesse Python (virava application/octet-stream, que o navegador trata
+    # como download binário, nunca tenta tocar como mídia) - e mesmo se
+    # reconhecesse, diria audio/mp4, que espera um container que não
+    # existe aqui. _mime_real() olha os bytes de verdade em vez do nome.
+    mime = _mime_real(data, row["file_name"])
     total = len(data)
 
     range_header = request.headers.get("Range", "")
@@ -1338,23 +1354,58 @@ def get_file_view(msg_id):
     return resp
 
 
-# Assinaturas de arquivo (magic bytes) conhecidas o suficiente pra separar os
-# formatos de áudio prováveis de sair do gravador nativo do Android.
-_MAGIC_SIGNATURES = [
-    (4, b"ftyp", "MP4/M4A/3GP (container ISO-BMFF - pode ser AAC, mas também pode ser AMR dentro de um 3GP)"),
-    (0, b"#!AMR\n", "AMR-NB puro (áudio de telefone antigo, baixíssima qualidade - Chrome/WebView geralmente NÃO reproduz isso)"),
-    (0, b"RIFF", "WAV"),
-    (0, b"OggS", "OGG (provavelmente Opus)"),
-    (0, b"ID3", "MP3 (com tag ID3)"),
-    (0, b"\xff\xfb", "MP3 (sem tag ID3)"),
-]
+def _is_adts_aac(data: bytes) -> bool:
+    """ADTS (Audio Data Transport Stream) - AAC cru, sem container nenhum,
+    cada quadro começa com 12 bits de sync (0xFFF) + ID(1 bit) + layer
+    (2 bits, sempre 00 pra AAC) + protection_absent(1 bit). Checagem
+    padrão: byte0==0xFF e (byte1 & 0xF6)==0xF0 (zera os 2 bits de layer,
+    que têm que ser 0, ignora ID e protection_absent que variam)."""
+    return len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xF6) == 0xF0
 
 
 def _identificar_formato(data: bytes) -> str:
-    for offset, assinatura, nome in _MAGIC_SIGNATURES:
-        if data[offset:offset + len(assinatura)] == assinatura:
-            return nome
+    """Achado real 2026-08-29: o gravador de som nativo do Android (via
+    RECORD_SOUND_ACTION) salva o áudio como AAC cru em ADTS - sem container
+    MP4 nenhum - mas nomeia o arquivo com extensão .m4a mesmo assim. Sem
+    essa checagem de ADTS, esse formato caía em "desconhecido" (visto ao
+    vivo no /debug/audio de um arquivo real) porque a única checagem de
+    AAC que existia dependia do átomo `ftyp`, que só existe em MP4/M4A de
+    verdade com container - nunca em ADTS puro."""
+    if data[:4] == b"RIFF":
+        return "WAV"
+    if data[:4] == b"OggS":
+        return "OGG (provavelmente Opus)"
+    if data[:6] == b"#!AMR\n":
+        return "AMR-NB puro (áudio de telefone antigo, baixíssima qualidade - Chrome/WebView geralmente NÃO reproduz isso)"
+    if data[4:8] == b"ftyp":
+        return "MP4/M4A/3GP de verdade (container ISO-BMFF)"
+    if data[:3] == b"ID3":
+        return "MP3 (com tag ID3)"
+    if _is_adts_aac(data):
+        return "AAC cru em ADTS (sem container - é o que o gravador nativo do Android produz, apesar do nome .m4a)"
     return "desconhecido"
+
+
+def _mime_real(data: bytes, filename: str) -> str:
+    """Mimetype de verdade pra servir no Content-Type - não confia na
+    extensão do nome do arquivo, porque o gravador nativo nomeia .m4a um
+    conteúdo que não é MP4 nenhum (ver _identificar_formato). Servir
+    audio/mp4 (ou pior, application/octet-stream, que nem reconhecido como
+    mídia era) pra bytes ADTS crus faz o navegador tentar (e falhar) abrir
+    como container MP4 - a causa raiz real do "grava mas não toca"."""
+    if _is_adts_aac(data):
+        return "audio/aac"
+    if data[:4] == b"RIFF":
+        return "audio/wav"
+    if data[:4] == b"OggS":
+        return "audio/ogg"
+    if data[:6] == b"#!AMR\n":
+        return "audio/amr"
+    if data[:3] == b"ID3":
+        return "audio/mpeg"
+    if data[4:8] == b"ftyp":
+        return "audio/mp4"
+    return mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
 
 @app.route("/debug/audio/<msg_id>")
