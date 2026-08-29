@@ -1282,7 +1282,18 @@ def get_file(msg_id):
 @app.route("/files/<msg_id>/view")
 def get_file_view(msg_id):
     """Bytes decifrados pra quem tem o direito de ver - usado pela própria
-    interface deste nó (player de áudio, link de download)."""
+    interface deste nó (player de áudio, link de download).
+
+    Precisa responder a Range requests (206 Partial Content) - achado real
+    2026-08-29: o player de áudio nativo (m4a gravado via RECORD_SOUND_ACTION,
+    v25) aparecia com "0:00 / 0:00" e nunca tocava. Container MP4/M4A grava
+    o átomo `moov` (com a duração) no FIM do arquivo quando não é
+    "faststart" - pra ler a duração, o navegador precisa pedir só o final
+    do arquivo via Range, sem baixar tudo primeiro. A rota devolvia sempre
+    o arquivo inteiro sem suporte a Range nenhum (diferente da rota irmã
+    `/files/<msg_id>` de baixo, que usa `send_file` e já suporta Range de
+    fábrica) - o navegador nunca conseguia calcular a duração e a UI ficava
+    travada em 0:00, mesmo com o áudio gravado certinho."""
     conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     row = conn.execute(
@@ -1301,7 +1312,28 @@ def get_file_view(msg_id):
         if data is None:
             abort(403)
     mime = mimetypes.guess_type(row["file_name"])[0] or "application/octet-stream"
-    resp = Response(data, mimetype=mime)
+    total = len(data)
+
+    range_header = request.headers.get("Range", "")
+    range_match = _re.match(r"bytes=(\d*)-(\d*)", range_header)
+    if range_match:
+        start_s, end_s = range_match.groups()
+        start = int(start_s) if start_s else 0
+        end = int(end_s) if end_s else total - 1
+        end = min(end, total - 1)
+        if start > end or start >= total:
+            resp = Response(status=416)
+            resp.headers["Content-Range"] = f"bytes */{total}"
+            return resp
+        chunk = data[start:end + 1]
+        resp = Response(chunk, status=206, mimetype=mime)
+        resp.headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        resp.headers["Content-Length"] = str(len(chunk))
+    else:
+        resp = Response(data, mimetype=mime)
+        resp.headers["Content-Length"] = str(total)
+
+    resp.headers["Accept-Ranges"] = "bytes"
     resp.headers["Content-Disposition"] = f'inline; filename="{row["file_name"]}"'
     return resp
 
