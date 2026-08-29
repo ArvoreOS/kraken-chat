@@ -729,6 +729,18 @@
       audio.controls = true;
       audio.src = "/files/" + msg.id + "/view";
       body.appendChild(audio);
+      // Link de baixar o arquivo bruto - além de ser útil em geral (levar
+      // o áudio pra outro app), foi o jeito real de conseguir inspecionar
+      // um áudio que gravava mas não tocava (investigação 2026-08-29): o
+      // gravador nativo às vezes não deixa cópia achável em Música/
+      // Gravações, então o arquivo que o Kraken já tem é o único jeito
+      // confiável de pegar os bytes reais.
+      const dl = document.createElement("a");
+      dl.href = "/files/" + msg.id;
+      dl.download = msg.file_name || "audio";
+      dl.className = "audio-download-link";
+      dl.textContent = "⬇ baixar áudio";
+      body.appendChild(dl);
     } else if (msg.kind === "file" && isImageName(msg.file_name)) {
       const a = document.createElement("a");
       a.href = "/files/" + msg.id + "/view";

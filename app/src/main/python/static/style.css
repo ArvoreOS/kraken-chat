@@ -230,6 +230,15 @@ body {
   height: 34px;
 }
 
+.msg a.audio-download-link {
+  display: block;
+  color: inherit;
+  text-decoration: underline;
+  font-size: 11.5px;
+  opacity: 0.75;
+  margin-top: 3px;
+}
+
 .msg-image {
   max-width: 220px;
   max-height: 280px;
