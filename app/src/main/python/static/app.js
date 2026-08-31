@@ -813,12 +813,25 @@
   // filtrando só as mensagens de arquivo que EU mandei (sender_id ===
   // senderId()) e que são imagem ou vídeo pelo nome do arquivo. Dado
   // real, sem inventar nada.
-  function avatarInitial() {
-    const n = (myName() || "?").trim();
+  // profileTarget = null → é o SEU próprio perfil. {id, name} → perfil de
+  // outra pessoa, aberto tocando no nome dela numa mensagem (pedido do
+  // Gilcimar, 2026-08-31). Sem rota nova: filtra messagesCache pelo
+  // sender_id de quem estiver sendo visto - mesma mecânica de sempre.
+  let profileTarget = null;
+
+  function avatarInitial(name) {
+    const n = (name || "?").trim();
     return n ? n[0].toUpperCase() : "?";
   }
 
   function syncProfileModeBadge() {
+    // O modo ON/OFF é um estado só local (localStorage), nunca anunciado
+    // pra outros nós - não tem como saber de verdade se OUTRA pessoa está
+    // ON ou OFF agora. Mostrar um selo aqui pra ela seria inventar dado
+    // que não existe, então o selo só aparece no SEU próprio perfil.
+    const viewingOther = !!profileTarget;
+    profileModeBadge.classList.toggle("hidden", viewingOther);
+    if (viewingOther) return;
     const on = !(window.KrakenMode && window.KrakenMode.get() === "off");
     profileModeBadge.classList.toggle("on", on);
     profileModeBadge.classList.toggle("off", !on);
@@ -826,19 +839,21 @@
   }
 
   function renderGallery() {
-    const mine = messagesCache.filter(
-      (m) => m.sender_id === senderId() && m.kind === "file" &&
+    const targetId = profileTarget ? profileTarget.id : senderId();
+    const viewingOther = !!profileTarget;
+    const items = messagesCache.filter(
+      (m) => m.sender_id === targetId && m.kind === "file" &&
         (isImageName(m.file_name) || isVideoName(m.file_name))
     );
     galleryGrid.innerHTML = "";
-    const nFotos = mine.filter((m) => isImageName(m.file_name)).length;
-    const nVideos = mine.length - nFotos;
-    profileStats.textContent = mine.length
+    const nFotos = items.filter((m) => isImageName(m.file_name)).length;
+    const nVideos = items.length - nFotos;
+    profileStats.textContent = items.length
       ? `${nFotos} foto${nFotos === 1 ? "" : "s"} · ${nVideos} vídeo${nVideos === 1 ? "" : "s"}`
       : "Nada na galeria ainda";
 
     // Ordena mais recente primeiro.
-    mine.slice().sort((a, b) => b.ts - a.ts).forEach((msg) => {
+    items.slice().sort((a, b) => b.ts - a.ts).forEach((msg) => {
       const tile = document.createElement("div");
       tile.className = "gallery-tile";
       const isVideo = isVideoName(msg.file_name);
@@ -859,20 +874,26 @@
       galleryGrid.appendChild(tile);
     });
 
-    const addTile = document.createElement("div");
-    addTile.className = "gallery-add-tile";
-    addTile.title = "Adicionar à galeria";
-    addTile.innerHTML = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#7B2CBF" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>';
-    addTile.addEventListener("click", () => {
-      closeProfile();
-      fileInput.click();
-    });
-    galleryGrid.appendChild(addTile);
+    // "Adicionar" só faz sentido na SUA própria galeria - na de outra
+    // pessoa não tem como (nem deveria) postar por ela.
+    if (!viewingOther) {
+      const addTile = document.createElement("div");
+      addTile.className = "gallery-add-tile";
+      addTile.title = "Adicionar à galeria";
+      addTile.innerHTML = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#7B2CBF" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>';
+      addTile.addEventListener("click", () => {
+        closeProfile();
+        fileInput.click();
+      });
+      galleryGrid.appendChild(addTile);
+    }
 
-    if (mine.length === 0) {
+    if (items.length === 0) {
       const empty = document.createElement("div");
       empty.className = "gallery-empty";
-      empty.textContent = "As fotos e vídeos que você enviar em qualquer conversa aparecem aqui.";
+      empty.textContent = viewingOther
+        ? `${profileTarget.name} ainda não mandou foto ou vídeo em nenhuma conversa com você.`
+        : "As fotos e vídeos que você enviar em qualquer conversa aparecem aqui.";
       galleryGrid.insertBefore(empty, galleryGrid.firstChild);
     }
   }
@@ -897,12 +918,18 @@
     profileTabSobre.classList.toggle("hidden", tab !== "sobre");
   }
 
-  async function openProfile() {
-    profileAvatarBig.textContent = avatarInitial();
-    profileNameEl.textContent = myName() || "Alguém";
-    aboutName.textContent = myName() || "Alguém";
-    await ensureMyIdentity();
-    aboutNodeId.textContent = myNodeId || "—";
+  async function openProfile(target) {
+    profileTarget = target || null;
+    const displayName = profileTarget ? profileTarget.name : (myName() || "Alguém");
+    profileAvatarBig.textContent = avatarInitial(displayName);
+    profileNameEl.textContent = displayName;
+    aboutName.textContent = displayName;
+    if (profileTarget) {
+      aboutNodeId.textContent = profileTarget.id || "—";
+    } else {
+      await ensureMyIdentity();
+      aboutNodeId.textContent = myNodeId || "—";
+    }
     syncProfileModeBadge();
     switchProfileTab("galeria");
     renderGallery();
@@ -911,11 +938,12 @@
 
   function closeProfile() {
     profileScreen.classList.add("hidden");
+    profileTarget = null;
   }
 
   btnAvatar.addEventListener("click", () => {
-    btnAvatar.textContent = avatarInitial();
-    openProfile();
+    btnAvatar.textContent = avatarInitial(myName());
+    openProfile(null);
   });
   profileBack.addEventListener("click", closeProfile);
   profileTabs.forEach((btn) => btn.addEventListener("click", () => switchProfileTab(btn.dataset.tab)));
@@ -931,6 +959,10 @@
     const sender = document.createElement("span");
     sender.className = "sender";
     sender.textContent = mine ? "Você" : msg.sender_name || "Alguém";
+    sender.classList.add("sender-clickable");
+    sender.addEventListener("click", () => {
+      openProfile(mine ? null : { id: msg.sender_id, name: msg.sender_name || "Alguém" });
+    });
     div.appendChild(sender);
 
     const body = document.createElement("div");

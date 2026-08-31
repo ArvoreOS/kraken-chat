@@ -207,6 +207,8 @@ body {
   word-wrap: break-word;
 }
 .msg .sender { font-size: 11.5px; font-weight: 700; margin-bottom: 2px; display: block; }
+.msg .sender.sender-clickable { cursor: pointer; width: fit-content; }
+.msg .sender.sender-clickable:active { opacity: .6; }
 .msg .time { font-size: 10px; opacity: .55; margin-top: 3px; display: block; text-align: right; }
 
 .msg.mine {
