@@ -146,6 +146,10 @@
   const btnCall = document.getElementById("btn-call");
   const btnBroadcast = document.getElementById("btn-broadcast");
   const btnGroupInvite = document.getElementById("btn-group-invite");
+  const liveScreen = document.getElementById("live-screen");
+  const liveVideo = document.getElementById("live-video");
+  const liveStatusText = document.getElementById("live-status-text");
+  const liveStopBtn = document.getElementById("live-stop-btn");
 
   let callState = null; // {call_id, role, pc, localStream, peer:{id,name,via,ip?,port?}, pendingOffer?}
   let myNodeId = null;
@@ -578,20 +582,360 @@
     setTimeout(callReset, 1500);
   }
 
-  btnCall.addEventListener("click", openPeerPicker);
-  // Botão de Live de verdade (transmitir pra plateia, tipo TikTok) -
-  // 2026-08-31, ainda não ligado no Janus (SFU rodando na Oracle, mas
-  // sem ponte de sinalização com o Kraken ainda) - por enquanto só avisa
-  // honestamente que está em construção, em vez de fingir que funciona.
-  btnBroadcast.addEventListener("click", () => {
+  // ---------- Live (transmissão pra plateia, via Janus Gateway/SFU) ----------
+  // Diferente da chamada acima (P2P puro, vídeo nunca passa pelo servidor),
+  // transmitir pra VÁRIOS espectadores ao mesmo tempo precisa de um servidor
+  // de mídia de verdade (Janus, rodando à parte na mesma VM do nó-semente,
+  // 2026-08-31) - recebe a transmissão 1 vez e retransmite pra todo mundo.
+  // O server.py só ajuda a achar "quem está ao vivo agora" e qual sala usar
+  // (/api/live/*, mesmo princípio do relay de chamada à distância) - a
+  // sinalização WebRTC de verdade (SDP/ICE) e o vídeo em si acontecem direto
+  // entre o navegador e o Janus, nunca passam pelo server.py.
+  //
+  // janus.js (biblioteca oficial, MIT, baixada direto do Janus compilado que
+  // roda na Oracle - mesma versão, sem risco de incompatibilidade) depende
+  // de um "webRTCAdapter" só pra tratar peculiaridades de Firefox/Safari -
+  // como o Kraken só roda em WebView/Chrome (Chromium), um stub simples no
+  // lugar do adapter.js de verdade (~200KB, mais uma dependência externa pra
+  // vendorizar) é suficiente e evita carregar peso à toa.
+  let liveState = null; // {role:"broadcaster"|"viewer", room, janusInstance, handle, localStream?, remoteStream?}
+  let liveHeartbeatTimerId = null;
+  let janusLibReady = null;
+
+  function ensureJanusInit() {
+    if (janusLibReady) return janusLibReady;
+    janusLibReady = new Promise((resolve, reject) => {
+      if (typeof Janus === "undefined") {
+        reject(new Error("Biblioteca do Janus não carregou"));
+        return;
+      }
+      Janus.init({
+        debug: false,
+        dependencies: Janus.useDefaultDependencies({
+          adapter: { browserDetails: { browser: "chrome", version: 999 } },
+        }),
+        callback: resolve,
+      });
+    });
+    return janusLibReady;
+  }
+
+  function liveReset() {
+    if (liveHeartbeatTimerId) {
+      clearInterval(liveHeartbeatTimerId);
+      liveHeartbeatTimerId = null;
+    }
+    if (liveState && liveState.role === "broadcaster" && myNodeId && seedHttpUrl) {
+      fetch(`${seedHttpUrl}/api/live/stop`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node_id: myNodeId }),
+      }).catch(() => {});
+    }
+    if (liveState && liveState.localStream) {
+      liveState.localStream.getTracks().forEach((t) => t.stop());
+    }
+    if (liveState && liveState.janusInstance) {
+      try { liveState.janusInstance.destroy(); } catch (e) {}
+    }
+    liveState = null;
+    liveScreen.classList.add("hidden");
+    liveVideo.srcObject = null;
+    liveVideo.muted = false;
+    liveStopBtn.classList.add("hidden");
+  }
+
+  function liveFail(msg) {
+    liveReset();
+    openModal(`<h3>🔴 Live</h3><p class="muted">${msg}</p>`);
+  }
+
+  // Mesmo achado real do v21 (chamada de vídeo) - se o app for pro segundo
+  // plano com a câmera presa numa transmissão, o hardware fica ocupado pra
+  // sempre até o Android matar o processo. Encerra sozinho, tanto pra quem
+  // transmite quanto pra quem assiste.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden || !liveState) return;
+    liveReset();
+  });
+
+  function joinAsPublisher(handle, room) {
+    handle.send({ message: { request: "join", room, ptype: "publisher", display: myName() || "Alguém" } });
+  }
+
+  function publishOwnFeed() {
+    if (!liveState || !liveState.handle || !liveState.localStream) return;
+    const handle = liveState.handle;
+    const tracks = [];
+    if (liveState.localStream.getAudioTracks().length > 0) {
+      tracks.push({ type: "audio", capture: liveState.localStream.getAudioTracks()[0], recv: false });
+    }
+    if (liveState.localStream.getVideoTracks().length > 0) {
+      tracks.push({ type: "video", capture: liveState.localStream.getVideoTracks()[0], recv: false });
+    }
+    handle.createOffer({
+      tracks,
+      success: (jsep) => {
+        handle.send({ message: { request: "configure", audio: true, video: true }, jsep });
+        liveGoLive();
+      },
+      error: (err) => liveFail("Erro ao publicar a transmissão: " + (err && err.message ? err.message : err)),
+    });
+  }
+
+  function liveGoLive() {
+    if (!liveState) return;
+    liveStatusText.textContent = "🔴 Você está ao vivo";
+    liveStopBtn.classList.remove("hidden");
+    liveHeartbeatTimerId = setInterval(() => {
+      if (!myNodeId || !seedHttpUrl) return;
+      fetch(`${seedHttpUrl}/api/live/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node_id: myNodeId, name: myName() || "Alguém" }),
+      }).catch(() => {});
+    }, 5000);
+  }
+
+  async function startLiveBroadcast() {
+    if (liveState) liveReset();
+    if (!Janus || !Janus.isWebrtcSupported || !Janus.isWebrtcSupported()) {
+      openModal("<h3>🔴 Live</h3><p class='muted'>Esse navegador não suporta transmissão ao vivo.</p>");
+      return;
+    }
+    await ensureMyIdentity();
+    if (!myNodeId || !seedHttpUrl) {
+      openModal("<h3>🔴 Live</h3><p class='muted'>Sem internet agora - não dá pra transmitir sem alcançar o nó-semente.</p>");
+      return;
+    }
+    let hb;
+    try {
+      const res = await fetch(`${seedHttpUrl}/api/live/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node_id: myNodeId, name: myName() || "Alguém" }),
+      });
+      hb = await res.json();
+    } catch (e) {
+      openModal("<h3>🔴 Live</h3><p class='muted'>Não consegui falar com o servidor de transmissão agora.</p>");
+      return;
+    }
+    if (!hb || !hb.ok) {
+      openModal(`<h3>🔴 Live</h3><p class='muted'>${(hb && hb.error) || "Não deu pra começar a transmissão."}</p>`);
+      return;
+    }
+    const room = hb.room;
+    const janusUrl = hb.janus;
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch (e) {
+      openModal(`<h3>🔴 Live</h3><p class='muted'>Não consegui acessar câmera/microfone.</p><p class='muted' style="font-size:11px">${e.name || "Erro"}: ${e.message || "sem detalhe"}</p>`);
+      return;
+    }
+
+    await ensureJanusInit();
+
+    liveState = { role: "broadcaster", room, janusInstance: null, handle: null, localStream: stream };
+    liveScreen.classList.remove("hidden");
+    liveVideo.muted = true;
+    liveVideo.srcObject = stream;
+    liveStatusText.textContent = "Preparando transmissão…";
+
+    const opaqueId = "kraken-live-" + Janus.randomString(12);
+    const janusInstance = new Janus({
+      server: janusUrl,
+      iceServers: ICE_SERVERS,
+      success: () => {
+        if (!liveState) return; // cancelado (liveReset) antes da sessão abrir
+        liveState.janusInstance = janusInstance;
+        janusInstance.attach({
+          plugin: "janus.plugin.videoroom",
+          opaqueId,
+          success: (handle) => {
+            if (!liveState) return;
+            liveState.handle = handle;
+            handle.send({
+              message: {
+                request: "create",
+                room,
+                description: "Kraken Live - " + (myName() || "Alguém"),
+                is_private: true,
+                publishers: 1,
+                bitrate: 300000,
+                fir_freq: 10,
+              },
+              // Achado real testando direto contra o Janus (curl, antes de
+              // buildar): "create"/"listparticipants" são requisições
+              // SÍNCRONAS - mesmo um erro do plugin (ex: 427 "sala já
+              // existe") chega aqui dentro de success(data), com
+              // data.error_code preenchido, e NÃO pelo callback error()
+              // (esse só dispara pra erro de transporte/protocolo, tipo
+              // sessão inválida). 427 é o caso normal de alguém que já
+              // transmitiu antes (a sala não é apagada sozinha) - trata
+              // como sucesso, segue pro join do mesmo jeito que uma sala
+              // recém-criada.
+              success: (data) => {
+                if (data && data.error_code && data.error_code !== 427) {
+                  liveFail("Não consegui criar a sala de transmissão: " + data.error);
+                  return;
+                }
+                joinAsPublisher(handle, room);
+              },
+              error: (err) => liveFail("Não consegui criar a sala de transmissão: " + err),
+            });
+          },
+          error: (err) => liveFail("Não consegui conectar no servidor de transmissão: " + err),
+          onmessage: (msg, jsep) => {
+            if (!liveState || liveState.role !== "broadcaster") return;
+            if (msg.videoroom === "joined") {
+              publishOwnFeed();
+            } else if (msg.videoroom === "event" && msg.error_code) {
+              liveFail(msg.error || "Erro ao transmitir");
+            }
+            if (jsep && liveState.handle) liveState.handle.handleRemoteJsep({ jsep });
+          },
+          onlocaltrack: () => {}, // já mostramos o preview com a stream original (getUserMedia nosso)
+          oncleanup: () => {},
+        });
+      },
+      error: (err) => liveFail("Não consegui conectar no servidor de transmissão: " + err),
+      destroyed: () => {},
+    });
+  }
+
+  async function watchLive(broadcaster) {
+    if (!broadcaster) return;
+    if (liveState) liveReset();
+    if (!Janus || !Janus.isWebrtcSupported || !Janus.isWebrtcSupported()) {
+      openModal("<h3>🔴 Live</h3><p class='muted'>Esse navegador não suporta assistir transmissão ao vivo.</p>");
+      return;
+    }
+    await ensureJanusInit();
+
+    liveState = { role: "viewer", room: broadcaster.room, janusInstance: null, handle: null, remoteStream: null };
+    liveScreen.classList.remove("hidden");
+    liveVideo.muted = false;
+    liveStatusText.textContent = `Conectando com a transmissão de ${broadcaster.name}…`;
+
+    const opaqueId = "kraken-live-" + Janus.randomString(12);
+    const janusInstance = new Janus({
+      server: broadcaster.janus,
+      iceServers: ICE_SERVERS,
+      success: () => {
+        if (!liveState) return;
+        liveState.janusInstance = janusInstance;
+        janusInstance.attach({
+          plugin: "janus.plugin.videoroom",
+          opaqueId,
+          success: (handle) => {
+            if (!liveState) return;
+            liveState.handle = handle;
+            handle.send({
+              message: { request: "listparticipants", room: broadcaster.room },
+              // Mesmo achado do "create" acima: erro do plugin (sala não
+              // existe mais, etc) chega aqui dentro de success(data), não
+              // em error().
+              success: (data) => {
+                if (!liveState) return;
+                if (data && data.error_code) {
+                  liveFail(`${broadcaster.name} não está mais ao vivo (${data.error}).`);
+                  return;
+                }
+                const pub = (data.participants || []).find((p) => p.publisher);
+                if (!pub) {
+                  liveFail(`${broadcaster.name} não está mais ao vivo.`);
+                  return;
+                }
+                handle.send({ message: { request: "join", room: broadcaster.room, ptype: "subscriber", streams: [{ feed: pub.id }] } });
+              },
+              error: (err) => liveFail("Não consegui entrar na transmissão: " + err),
+            });
+          },
+          error: (err) => liveFail("Não consegui conectar no servidor de transmissão: " + err),
+          onmessage: (msg, jsep) => {
+            if (!liveState || liveState.role !== "viewer" || !liveState.handle) return;
+            if (msg.videoroom === "event" && msg.error_code) {
+              liveFail(msg.error || "Erro ao assistir a transmissão");
+              return;
+            }
+            if (jsep) {
+              liveState.handle.createAnswer({
+                jsep,
+                tracks: [{ type: "data" }], // recvonly de áudio/vídeo (sem capturar nada nosso)
+                success: (answerJsep) => {
+                  if (!liveState || !liveState.handle) return;
+                  liveState.handle.send({ message: { request: "start", room: broadcaster.room }, jsep: answerJsep });
+                },
+                error: (err) => liveFail("Erro ao assistir a transmissão: " + (err && err.message ? err.message : err)),
+              });
+            }
+          },
+          onremotetrack: (track, mid, on) => {
+            if (!liveState) return;
+            if (on) {
+              if (!liveState.remoteStream) liveState.remoteStream = new MediaStream();
+              liveState.remoteStream.addTrack(track);
+              liveVideo.srcObject = liveState.remoteStream;
+              liveStatusText.textContent = `🔴 Assistindo ${broadcaster.name}`;
+              liveStopBtn.classList.remove("hidden");
+            } else if (liveState.remoteStream) {
+              liveState.remoteStream.removeTrack(track);
+            }
+          },
+          oncleanup: () => {},
+        });
+      },
+      error: (err) => liveFail("Não consegui conectar no servidor de transmissão: " + err),
+      destroyed: () => {},
+    });
+  }
+
+  async function openLivePicker() {
+    if (window.KrakenMode && window.KrakenMode.get() === "off") {
+      openModal("<h3>🔴 Live</h3><p class='muted'>Ligue o modo online pra usar o Live.</p>");
+      return;
+    }
+    await ensureMyIdentity();
+    if (!myNodeId || !seedHttpUrl) {
+      openModal("<h3>🔴 Live</h3><p class='muted'>Sem internet agora - Live precisa do nó-semente pra achar quem está transmitindo.</p>");
+      return;
+    }
+    let data = { live: [] };
+    try {
+      const res = await fetch(`${seedHttpUrl}/api/live/who_is_live?my_id=${encodeURIComponent(myNodeId)}`);
+      data = await res.json();
+    } catch (e) {
+      // sem conexão com o nó-semente agora - segue só com o botão de
+      // transmitir, sem lista de quem está ao vivo agora.
+    }
+    const liveList = (data.live || []).map((p) => ({ ...p, janus: data.janus }));
+    const rows = liveList.map((p, i) => `
+      <button type="button" class="call-pick-btn" data-i="${i}">🔴 Assistir ${p.name}</button>
+    `).join("");
     openModal(`
       <h3>🔴 Live</h3>
-      <p class="muted">Ainda em construção - o servidor de transmissão já está rodando,
-      falta ligar ele aqui dentro do Kraken.</p>
-      <button id="modal-close-btn" class="btn roxo">Entendi</button>
+      <button type="button" id="live-start-btn" class="btn vermelho" style="width:100%;margin-bottom:10px">🔴 Transmitir agora</button>
+      ${rows ? `<div class="call-pick-list">${rows}</div>` : "<p class='muted'>Ninguém transmitindo agora.</p>"}
     `);
-    document.getElementById("modal-close-btn").addEventListener("click", closeModal);
-  });
+    document.getElementById("live-start-btn").addEventListener("click", () => {
+      closeModal();
+      startLiveBroadcast();
+    });
+    modalContent.querySelectorAll(".call-pick-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const p = liveList[Number(btn.dataset.i)];
+        closeModal();
+        watchLive(p);
+      });
+    });
+  }
+
+  liveStopBtn.addEventListener("click", liveReset);
+
+  btnCall.addEventListener("click", openPeerPicker);
+  btnBroadcast.addEventListener("click", openLivePicker);
   callAcceptBtn.addEventListener("click", acceptCall);
   callRejectBtn.addEventListener("click", rejectCall);
   callHangupBtn.addEventListener("click", hangupCall);

@@ -148,8 +148,17 @@
   </div>
 </div>
 
+<div id="live-screen" class="live-screen hidden">
+  <video id="live-video" class="live-video" autoplay playsinline></video>
+  <div class="live-status" id="live-status-text"></div>
+  <div class="call-controls">
+    <button type="button" id="live-stop-btn" class="call-btn call-hangup hidden">Encerrar</button>
+  </div>
+</div>
+
 <script src="/static/mode.js"></script>
 <script src="/static/socket.io.min.js"></script>
+<script src="/static/janus.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -27,6 +27,7 @@ funcionar (um nó "de fora" carrega a mensagem até ela chegar no destino
 certo). Quem não tem a chave nunca consegue decifrar o conteúdo.
 """
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -95,6 +96,13 @@ BOOTSTRAP_PEERS_RAW = os.environ.get("KRAKEN_BOOTSTRAP_PEERS", "136.248.100.20:8
 # abaixo) - mesmo IP do BOOTSTRAP_PEERS_RAW, mas a porta HTTP (7000) é
 # diferente da porta de gossip (8892). Só existe 1 nó-semente hoje.
 SEED_HTTP_URL = os.environ.get("KRAKEN_SEED_HTTP_URL", "http://136.248.100.20:7000")
+# Endereço do Janus Gateway (SFU) que faz a transmissão Live de verdade
+# (2026-08-31: compilado e rodando na mesma VM do nó-semente, porta 8088,
+# ver janus-live.service) - o servidor Flask aqui nunca fala com o Janus
+# diretamente, só devolve esse endereço pro navegador de quem transmite e
+# de quem assiste, que negociam WebRTC direto com o Janus (mesmo princípio
+# das chamadas 1-a-1: o vídeo nunca passa por dentro do server.py).
+JANUS_HTTP_URL = os.environ.get("KRAKEN_JANUS_HTTP_URL", "http://136.248.100.20:8088/janus")
 
 try:
     # No Termux/desktop, BASE_DIR/data é sempre gravável. No Android/Chaquopy,
@@ -1210,6 +1218,88 @@ def api_call_relay_poll():
     with _pending_relay_lock:
         events = _pending_relay_events.pop(my_id, [])
     return _cors(jsonify({"events": events}))
+
+
+# ---------- Live (transmissão pra plateia, via Janus Gateway/SFU) ----------
+# Diferente da chamada 1-a-1 acima (P2P puro, o servidor só repassa a
+# sinalização e o vídeo nunca passa por aqui), transmitir pra VÁRIOS
+# espectadores ao mesmo tempo não dá pra fazer em P2P puro - o celular de
+# quem transmite teria que mandar a MESMA transmissão uma vez pra CADA
+# espectador, nenhum plano/link aguenta. Por isso existe o Janus (SFU -
+# recebe 1 vez, retransmite pra todo mundo), rodando à parte na mesma VM
+# do nó-semente. O papel do server.py aqui é só o mesmo "correio" já usado
+# pra achar quem chamar à distância: quem está ao vivo agora, e qual sala
+# do Janus cada um usa - a sinalização WebRTC de verdade (SDP/ICE) e o
+# vídeo em si acontecem direto entre o navegador e o Janus, sem passar
+# por aqui em nenhum momento.
+_live_presence = {}   # node_id -> {"name":..., "room": int, "last_seen": ts}
+_live_presence_lock = threading.Lock()
+
+
+def _live_room_for(node_id):
+    """Número de sala do Janus, sempre o mesmo pro mesmo node_id - assim
+    quem quer assistir alguém calcula a mesma sala sozinho, sem precisar
+    perguntar a mais ninguém. Derivado por hash (longe da sala de
+    demonstração 1234 que já vem de fábrica no
+    janus.plugin.videoroom.jcfg, pra nunca colidir com ela)."""
+    h = hashlib.sha1(node_id.encode()).hexdigest()
+    return 100000 + (int(h[:8], 16) % 8000000)
+
+
+def _prune_live_presence_loop():
+    while True:
+        time.sleep(10)
+        now = time.time()
+        with _live_presence_lock:
+            dead = [nid for nid, p in _live_presence.items() if now - p["last_seen"] > _PRESENCE_TIMEOUT]
+            for nid in dead:
+                del _live_presence[nid]
+
+
+threading.Thread(target=_prune_live_presence_loop, daemon=True).start()
+
+
+@app.route("/api/live/heartbeat", methods=["POST", "OPTIONS"])
+def api_live_heartbeat():
+    """Chamado a cada poucos segundos por quem está transmitindo agora
+    (mesmo padrão de /api/call/relay/heartbeat) - mantém a presença viva e
+    devolve a sala do Janus a usar. Reusar essa rota pra manter viva
+    também funciona como "ainda estou ao vivo" - se parar de chamar, a
+    limpeza automática acima tira da lista sozinha em até 20s."""
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    node_id = data.get("node_id")
+    if not node_id:
+        return _cors(jsonify({"ok": False, "error": "node_id obrigatório"})), 400
+    room = _live_room_for(node_id)
+    with _live_presence_lock:
+        _live_presence[node_id] = {"name": data.get("name") or "Alguém", "room": room, "last_seen": time.time()}
+    return _cors(jsonify({"ok": True, "room": room, "janus": JANUS_HTTP_URL}))
+
+
+@app.route("/api/live/stop", methods=["POST", "OPTIONS"])
+def api_live_stop():
+    """Sai da lista na hora (em vez de esperar os até 20s do timeout) -
+    quem para de transmitir de propósito some da lista de quem tá
+    assistindo de imediato."""
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    node_id = data.get("node_id")
+    with _live_presence_lock:
+        _live_presence.pop(node_id, None)
+    return _cors(jsonify({"ok": True}))
+
+
+@app.route("/api/live/who_is_live")
+def api_live_who_is_live():
+    my_id = request.args.get("my_id", "")
+    with _live_presence_lock:
+        return _cors(jsonify({
+            "live": [{"id": nid, "name": p["name"], "room": p["room"]} for nid, p in _live_presence.items() if nid != my_id],
+            "janus": JANUS_HTTP_URL,
+        }))
 
 
 @app.route("/api/send", methods=["POST"])
