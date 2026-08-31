@@ -178,6 +178,10 @@ function waitIceComplete(p) {
       }
     }
     p.addEventListener("icegatheringstatechange", check);
+    // Ajuste 2026-08-31 (trazido da chamada real do Kraken, que já tinha
+    // essa proteção e este teste não tinha): nunca trava esperando ICE
+    // pra sempre - depois de 3s manda o que já tiver.
+    setTimeout(resolve, 3000);
   });
 }
 
