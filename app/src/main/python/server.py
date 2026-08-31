@@ -855,16 +855,12 @@ app = Flask(__name__, static_folder=str(RESOURCE_DIR / "static"), template_folde
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024  # 64MB por arquivo
 socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
-# App de teste ISOLADO (2026-08-31, pedido do Gilcimar) - só pra provar
-# câmera/áudio P2P via internet usando esta porta como sinalização,
-# zero relação com malha/mensagem/cripto do Kraken. Ver testcall.py.
-from testcall import testcall_bp
-app.register_blueprint(testcall_bp)
-
-# Mesmo espírito, agora pra voz/áudio (mensagem de voz ou arquivo de som) -
-# ver testaudio.py.
-from testaudio import testaudio_bp
-app.register_blueprint(testaudio_bp)
+# Os apps de teste isolados (testcall.py, testaudio.py - câmera/áudio P2P
+# via internet, sem nenhuma relação com o Kraken real) cumpriram o
+# propósito (confirmar os dois mecanismos funcionando antes de achar os
+# bugs reais no app de verdade - v37/v38) e foram desativados e apagados
+# a pedido do Gilcimar em 2026-08-31, depois de tudo já confirmado
+# funcionando no app real.
 
 
 @app.after_request
