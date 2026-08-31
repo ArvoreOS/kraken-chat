@@ -815,6 +815,12 @@ app = Flask(__name__, static_folder=str(RESOURCE_DIR / "static"), template_folde
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024  # 64MB por arquivo
 socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
+# App de teste ISOLADO (2026-08-31, pedido do Gilcimar) - só pra provar
+# câmera/áudio P2P via internet usando esta porta como sinalização,
+# zero relação com malha/mensagem/cripto do Kraken. Ver testcall.py.
+from testcall import testcall_bp
+app.register_blueprint(testcall_bp)
+
 
 @app.after_request
 def _no_cache(response):
