@@ -821,6 +821,11 @@ socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 from testcall import testcall_bp
 app.register_blueprint(testcall_bp)
 
+# Mesmo espírito, agora pra voz/áudio (mensagem de voz ou arquivo de som) -
+# ver testaudio.py.
+from testaudio import testaudio_bp
+app.register_blueprint(testaudio_bp)
+
 
 @app.after_request
 def _no_cache(response):
