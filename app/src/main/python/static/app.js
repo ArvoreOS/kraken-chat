@@ -1052,6 +1052,25 @@
   let recordTimerInterval = null;
   let recordStartTs = 0;
 
+  // Mesmo princípio já usado na chamada de vídeo (visibilitychange perto da
+  // linha 185) - achado real 2026-08-31: aquela limpeza só cobria
+  // `callState`, não a gravação de mensagem de voz. Se o app fosse pro
+  // segundo plano NO MEIO de uma gravação (troca de app, bloqueio de
+  // tela), o microfone nunca era liberado - toda tentativa seguinte, pro
+  // resto da vida dessa janela do WebView, passava a falhar com
+  // `NotReadableError: Could not start audio source`, MESMO sem nenhum
+  // outro app usando o microfone (confirmado ao vivo: reportado logo
+  // depois de uma gravação ter cortado sozinha no testaudio.py - mesmo
+  // mecanismo do navegador pausando captura em 2º plano, só que ali sem
+  // consequência porque cada teste abre uma aba nova/processo novo).
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) return;
+    if (mediaRecorder && mediaRecorder.state === "recording") {
+      discardNextRecording = true;
+      mediaRecorder.stop(); // dispara onstop, que já solta as tracks
+    }
+  });
+
   function startWaveform(stream) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const source = audioCtx.createMediaStreamSource(stream);
