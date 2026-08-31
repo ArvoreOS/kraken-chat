@@ -1211,6 +1211,28 @@ def api_groups_create():
     return jsonify({"ok": True, "group": store.get_group_public(group_id), "invite": invite})
 
 
+@app.route("/api/groups/<group_id>/invite")
+def api_group_invite(group_id):
+    """Reexibe o convite de um grupo que JÁ existe - achado real
+    2026-08-31 (pedido do Gilcimar): o convite só aparecia uma vez, na
+    hora de criar o grupo (ver api_groups_create). Quem não salvou o
+    texto em outro lugar (WhatsApp, nota) nunca mais conseguia convidar
+    ninguém pra esse grupo - lacuna real, não decisão consciente. Só
+    quem já é membro deste nó consegue reexibir (evita vazar a chave de
+    um grupo privado que este nó só CONHECE de repasse, sem nunca ter
+    entrado de verdade)."""
+    group = store.get_group(group_id)
+    if not group:
+        return jsonify({"ok": False, "error": "grupo não encontrado"}), 404
+    if NODE_ID not in store.list_members(group_id):
+        return jsonify({"ok": False, "error": "você não é membro deste grupo"}), 403
+    invite = {
+        "group_id": group["id"], "name": group["name"], "kind": group["kind"],
+        "key": base64.b64encode(group["key"]).decode() if group.get("key") else None,
+    }
+    return jsonify({"ok": True, "invite": invite})
+
+
 @app.route("/api/groups/join", methods=["POST"])
 def api_groups_join():
     data = request.get_json(force=True)
@@ -1589,34 +1611,54 @@ def debug_page():
     </body></html>"""
 
 
-@app.route("/join")
-def join():
-    ip = local_ip()
-    url = f"http://{ip}:{HTTP_PORT}/"
-    svg_bytes = ""
-    debug_error = ""
+def _qr_svg(text: str) -> str:
+    """SVG embutível (sem <?xml>, sem prefixo svg: nos elementos) de um QR
+    code pro texto dado. Extraído do /join (achado real 2026-08-27: SvgImage
+    base gera <svg:rect> com prefixo de namespace, que o parser de HTML não
+    reconhece como forma de SVG de verdade quando colado dentro de uma
+    página - só SvgPathImage funciona embutido). Reusado em 2026-08-31 pro
+    convite de grupo (pedido do Gilcimar: trocar o código de convite em
+    texto por um QR). Devolve string vazia em qualquer erro - quem chama
+    decide o que mostrar no lugar (nunca acontece de fato quebrar o
+    convite em texto, que continua funcionando sempre)."""
     try:
         import qrcode
         import qrcode.image.svg
         from io import BytesIO
-        # SvgImage (base) gera <svg:rect> com prefixo de namespace - o
-        # parser de HTML do navegador não reconhece isso como forma de SVG
-        # de verdade quando colado dentro de uma página (só funciona como
-        # arquivo .svg isolado), então a caixa ficava em branco sem erro
-        # nenhum. SvgPathImage gera um único <path> sem prefixo - funciona
-        # embutido. Achado real, 2026-08-27.
-        img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage)
+        img = qrcode.make(text, image_factory=qrcode.image.svg.SvgPathImage)
         buf = BytesIO()
         img.save(buf)
-        svg_bytes = buf.getvalue().decode()
-        # O cabeçalho <?xml ...?> também quebra o parser de HTML no meio do
-        # documento (não é um arquivo .xml isolado) - remove antes de colar.
-        if svg_bytes.startswith("<?xml"):
-            svg_bytes = svg_bytes.split("?>", 1)[1]
+        svg = buf.getvalue().decode()
+        if svg.startswith("<?xml"):
+            svg = svg.split("?>", 1)[1]
+        return svg
     except Exception:
         import traceback
-        debug_error = traceback.format_exc()
-        print(f"[join] falha ao gerar QR code:\n{debug_error}")
+        print(f"[_qr_svg] falha ao gerar QR code:\n{traceback.format_exc()}")
+        return ""
+
+
+@app.route("/api/qr")
+def api_qr():
+    """QR code (SVG puro) de um texto qualquer, pra embutir em qualquer
+    tela via <img> ou fetch+innerHTML. Usado hoje só pelo convite de
+    grupo, mas genérico de propósito - não amarrado a nenhum formato
+    específico de convite."""
+    text = request.args.get("text", "")
+    if not text:
+        return Response("", mimetype="image/svg+xml"), 400
+    svg = _qr_svg(text)
+    if not svg:
+        return Response("", mimetype="image/svg+xml"), 500
+    return Response(svg, mimetype="image/svg+xml")
+
+
+@app.route("/join")
+def join():
+    ip = local_ip()
+    url = f"http://{ip}:{HTTP_PORT}/"
+    svg_bytes = _qr_svg(url)
+    debug_error = "" if svg_bytes else "veja o log do servidor (print [_qr_svg])"
     logo_uri = _logo_data_uri()
     return f"""<!doctype html><html><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">

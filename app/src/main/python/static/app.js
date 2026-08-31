@@ -125,6 +125,7 @@
   const callHangupBtn = document.getElementById("call-hangup-btn");
   const callMuteBtn = document.getElementById("call-mute-btn");
   const btnLive = document.getElementById("btn-live");
+  const btnGroupInvite = document.getElementById("btn-group-invite");
 
   let callState = null; // {call_id, role, pc, localStream, peer:{id,name,via,ip?,port?}, pendingOffer?}
   let myNodeId = null;
@@ -544,6 +545,9 @@
     currentConv = conv;
     renderTabs();
     redrawMessages();
+    // Botão de reexibir convite (2026-08-31) só faz sentido dentro de um
+    // grupo - em Geral/direta não existe "convite" pra mostrar.
+    btnGroupInvite.classList.toggle("hidden", conv.type !== "group");
   }
 
   function isActiveChip(c) {
@@ -630,10 +634,25 @@
       return;
     }
     await loadGroups();
-    const token = encodeInvite(data.invite);
+    showInviteModal(data.invite, "Grupo criado!");
+    setConversation({ type: "group", group_id: data.group.id, name: data.group.name });
+  }
+
+  // QR code do convite (pedido do Gilcimar, 2026-08-31): mesma técnica já
+  // usada no /join (SVG embutido, sem precisar de internet nem lib nova).
+  // A pessoa que vai entrar ainda precisa colar o texto (o app não tem
+  // leitor de QR ainda, só gerador) - mas já facilita bastante pra quem
+  // tira print/mostra a tela em vez de copiar o texto gigante. Usada tanto
+  // na hora de criar o grupo quanto pra reexibir o convite depois
+  // (btn-group-invite) - antes disso o convite só aparecia 1 vez, na
+  // criação, e sumia pra sempre se ninguém salvasse em outro lugar.
+  function showInviteModal(invite, titulo) {
+    const token = encodeInvite(invite);
     openModal(`
-      <h3>Grupo criado!</h3>
-      <p>Compartilhe este código pra convidar (WhatsApp, e-mail, etc):</p>
+      <h3>${titulo}</h3>
+      <p>Mostre este QR pra pessoa fotografar, ou copie o código de texto
+      (WhatsApp, e-mail, etc):</p>
+      <div id="invite-qr" style="width:200px;margin:12px auto"></div>
       <textarea id="invite-out" rows="4" readonly></textarea>
       <button id="modal-close-btn" class="btn verde">Entendi</button>
     `);
@@ -641,8 +660,23 @@
     out.value = token;
     out.addEventListener("click", () => out.select());
     document.getElementById("modal-close-btn").addEventListener("click", closeModal);
-    setConversation({ type: "group", group_id: data.group.id, name: data.group.name });
+    fetch("/api/qr?text=" + encodeURIComponent(token))
+      .then((r) => r.text())
+      .then((svg) => { document.getElementById("invite-qr").innerHTML = svg; })
+      .catch(() => {}); // sem QR não impede o convite por texto de funcionar
   }
+
+  btnGroupInvite.addEventListener("click", async () => {
+    if (currentConv.type !== "group") return;
+    try {
+      const res = await fetch(`/api/groups/${encodeURIComponent(currentConv.group_id)}/invite`);
+      const data = await res.json();
+      if (!data.ok) { alert(data.error || "erro ao buscar convite"); return; }
+      showInviteModal(data.invite, "Convite do grupo");
+    } catch (e) {
+      alert("erro ao buscar convite: " + (e.message || e));
+    }
+  });
 
   async function joinGroupFromToken(token) {
     const invite = decodeInvite(token);
@@ -1065,11 +1099,31 @@
       // Achado real (2026-08-27): em alguns celulares o microfone via
       // WebView (getUserMedia) fica indisponível mesmo com o hardware
       // livre e a permissão certa - é limitação da própria WebView, não
-      // do Kraken. Em vez de só travar com um alerta, cai automaticamente
-      // pro gravador de som NATIVO do Android (audioCaptureInput, usa
-      // "capture" no input de arquivo - nem passa pelo getUserMedia).
-      console.warn("Gravação ao vivo falhou, caindo pro gravador nativo:", e.name, e.message);
-      audioCaptureInput.click();
+      // do Kraken.
+      //
+      // MUDANÇA (2026-08-31): até aqui, caía automaticamente e em
+      // silêncio pro gravador NATIVO do Android (audioCaptureInput).
+      // Achado real na mesma data: o gravador nativo desse tipo de
+      // aparelho (Xiaomi/MIUI) produz áudio SEM SOM nenhum quando
+      // chamado por outro app via intent (RECORD_SOUND_ACTION) - achado
+      // testando o testaudio.py isolado (gravação ao vivo saiu com som
+      // real, confirmado com ffprobe/volumedetect) e batendo o nome do
+      // arquivo problemático anterior ("30 de ago. 23.38.m4a", padrão
+      // do nativo) com esse mesmo caminho de fallback silencioso.
+      // Cair escondido nesse caminho quebrado produzia uma mensagem de
+      // voz muda sem avisar nada - pior que simplesmente mostrar o erro
+      // real. Agora mostra o erro e PERGUNTA antes de tentar o nativo
+      // (continua disponível como último recurso manual, não mais
+      // automático/silencioso).
+      console.warn("Gravação ao vivo falhou:", e.name, e.message);
+      const tentarNativo = confirm(
+        `Não consegui abrir o microfone do navegador (${e.name || "erro"}: ` +
+        `${e.message || "sem detalhe"}).\n\n` +
+        `Quer tentar o gravador de som do celular em vez disso? ` +
+        `(atenção: em alguns aparelhos ele grava sem som - se sair mudo, ` +
+        `esse é o motivo, não é a mensagem que se perdeu)`
+      );
+      if (tentarNativo) audioCaptureInput.click();
       return;
     }
     try {
