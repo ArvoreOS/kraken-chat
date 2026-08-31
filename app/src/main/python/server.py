@@ -1493,13 +1493,33 @@ def _identificar_formato(data: bytes) -> str:
     return "desconhecido"
 
 
+_VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".3gp", ".mkv")
+# .webm fica de fora de propósito - ao contrário de .mp4/.mov (onde a
+# extensão diferencia áudio de vídeo na prática), o Kraken usa ".webm"
+# pros DOIS: "audio.webm" é o nome fixo que o próprio gravador de voz
+# sempre usa (ver uploadBlob() em app.js), mas um vídeo comum anexado
+# também tende a se chamar "*.webm". Resolvido abaixo comparando o nome
+# exato "audio.webm", não a extensão sozinha.
+
+
 def _mime_real(data: bytes, filename: str) -> str:
     """Mimetype de verdade pra servir no Content-Type - não confia na
     extensão do nome do arquivo, porque o gravador nativo nomeia .m4a um
     conteúdo que não é MP4 nenhum (ver _identificar_formato). Servir
     audio/mp4 (ou pior, application/octet-stream, que nem reconhecido como
     mídia era) pra bytes ADTS crus faz o navegador tentar (e falhar) abrir
-    como container MP4 - a causa raiz real do "grava mas não toca"."""
+    como container MP4 - a causa raiz real do "grava mas não toca".
+
+    Achado real 2026-08-31 (construindo a galeria de perfil): os
+    contêineres MP4/M4A (box `ftyp`) e WebM/Matroska (assinatura EBML)
+    são os MESMOS containers binários pra áudio puro E pra vídeo com
+    áudio - só dá pra saber qual é lendo átomos/elementos mais fundo
+    (trilha de vídeo dentro da estrutura), que essa função não faz. Sem
+    essa distinção, um vídeo .mp4/.webm de verdade (mandado como arquivo
+    comum) virava mimetype de áudio - o <video> da galeria nunca
+    mostrava nada. Como só o CONTAINER é ambíguo (o resto dos formatos
+    acima já é inequívoco pelos bytes), usa o nome do arquivo só como
+    desempate AQUI."""
     if _is_adts_aac(data):
         return "audio/aac"
     if data[:4] == b"RIFF":
@@ -1510,8 +1530,10 @@ def _mime_real(data: bytes, filename: str) -> str:
         return "audio/amr"
     if data[:3] == b"ID3":
         return "audio/mpeg"
+    if data[:4] == b"\x1aE\xdf\xa3":  # EBML - WebM/Matroska (áudio OU vídeo, mesmo container)
+        return "audio/webm" if filename == "audio.webm" else "video/webm"
     if data[4:8] == b"ftyp":
-        return "audio/mp4"
+        return "video/mp4" if filename.lower().endswith(_VIDEO_EXTS) else "audio/mp4"
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
 

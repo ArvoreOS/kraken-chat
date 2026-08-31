@@ -49,6 +49,7 @@
       <button type="button" id="mode-toggle" class="mode-toggle on" title="Modo online/offline">
         <span class="plug">🔌</span><span id="mode-toggle-text">ON</span>
       </button>
+      <button type="button" id="btn-avatar" class="avatar-btn" title="Perfil"></button>
     </div>
     <div class="status" id="status">
       <span class="dot" id="status-dot"></span>
@@ -91,6 +92,47 @@
 
 <div id="modal-overlay" class="modal-overlay hidden">
   <div class="modal" id="modal-content"></div>
+</div>
+
+<div id="profile-screen" class="profile-screen hidden">
+  <header class="profile-topbar">
+    <button type="button" id="profile-back" class="icon-btn" title="Voltar">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#222" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+    </button>
+    <span class="profile-topbar-title">Perfil</span>
+  </header>
+
+  <div class="profile-header">
+    <div id="profile-avatar-big" class="avatar-big"></div>
+    <div class="profile-name-row">
+      <span id="profile-name" class="profile-name"></span>
+      <span id="profile-mode-badge" class="profile-mode-badge on">
+        <span class="dot"></span><span id="profile-mode-badge-text">ON</span>
+      </span>
+    </div>
+    <div id="profile-stats" class="profile-stats"></div>
+  </div>
+
+  <div class="profile-tabs">
+    <button type="button" class="profile-tab active" data-tab="galeria">Galeria</button>
+    <button type="button" class="profile-tab" data-tab="sobre">Sobre</button>
+  </div>
+
+  <div id="profile-tab-galeria" class="profile-tab-panel">
+    <div id="gallery-grid" class="gallery-grid"></div>
+  </div>
+
+  <div id="profile-tab-sobre" class="profile-tab-panel hidden">
+    <div class="profile-about">
+      <div class="profile-about-row"><span>Nome</span><b id="about-name"></b></div>
+      <div class="profile-about-row"><span>Identificação do nó</span><b id="about-node-id" class="mono"></b></div>
+    </div>
+  </div>
+</div>
+
+<div id="media-viewer" class="media-viewer hidden">
+  <button type="button" id="media-viewer-close" class="media-viewer-close">✕</button>
+  <div id="media-viewer-content" class="media-viewer-content"></div>
 </div>
 
 <div id="call-screen" class="call-screen hidden">

@@ -44,6 +44,25 @@
   const appBannerDownload = document.getElementById("app-banner-download");
   const appBannerDismiss = document.getElementById("app-banner-dismiss");
 
+  // ---------- perfil / galeria (2026-08-31) ----------
+  const btnAvatar = document.getElementById("btn-avatar");
+  const profileScreen = document.getElementById("profile-screen");
+  const profileBack = document.getElementById("profile-back");
+  const profileAvatarBig = document.getElementById("profile-avatar-big");
+  const profileNameEl = document.getElementById("profile-name");
+  const profileModeBadge = document.getElementById("profile-mode-badge");
+  const profileModeBadgeText = document.getElementById("profile-mode-badge-text");
+  const profileStats = document.getElementById("profile-stats");
+  const profileTabs = document.querySelectorAll(".profile-tab");
+  const profileTabGaleria = document.getElementById("profile-tab-galeria");
+  const profileTabSobre = document.getElementById("profile-tab-sobre");
+  const galleryGrid = document.getElementById("gallery-grid");
+  const aboutName = document.getElementById("about-name");
+  const aboutNodeId = document.getElementById("about-node-id");
+  const mediaViewer = document.getElementById("media-viewer");
+  const mediaViewerClose = document.getElementById("media-viewer-close");
+  const mediaViewerContent = document.getElementById("media-viewer-content");
+
   // Parâmetros de URL só para simulação/teste (?demo_name=Ana&demo_id=phoneA).
   // Não afetam o uso normal, que continua guardando tudo em localStorage.
   const demoParams = new URLSearchParams(location.search);
@@ -784,6 +803,125 @@
     return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name || "");
   }
 
+  function isVideoName(name) {
+    return /\.(mp4|webm|mov|mkv|m4v|3gp)$/i.test(name || "");
+  }
+
+  // ---------- perfil / galeria (2026-08-31, pedido do Gilcimar) ----------
+  // Sem rota nova no servidor: a galeria é derivada do que já está em
+  // messagesCache (o mesmo /api/messages que já alimenta as conversas) -
+  // filtrando só as mensagens de arquivo que EU mandei (sender_id ===
+  // senderId()) e que são imagem ou vídeo pelo nome do arquivo. Dado
+  // real, sem inventar nada.
+  function avatarInitial() {
+    const n = (myName() || "?").trim();
+    return n ? n[0].toUpperCase() : "?";
+  }
+
+  function syncProfileModeBadge() {
+    const on = !(window.KrakenMode && window.KrakenMode.get() === "off");
+    profileModeBadge.classList.toggle("on", on);
+    profileModeBadge.classList.toggle("off", !on);
+    profileModeBadgeText.textContent = on ? "ON" : "OFF";
+  }
+
+  function renderGallery() {
+    const mine = messagesCache.filter(
+      (m) => m.sender_id === senderId() && m.kind === "file" &&
+        (isImageName(m.file_name) || isVideoName(m.file_name))
+    );
+    galleryGrid.innerHTML = "";
+    const nFotos = mine.filter((m) => isImageName(m.file_name)).length;
+    const nVideos = mine.length - nFotos;
+    profileStats.textContent = mine.length
+      ? `${nFotos} foto${nFotos === 1 ? "" : "s"} · ${nVideos} vídeo${nVideos === 1 ? "" : "s"}`
+      : "Nada na galeria ainda";
+
+    // Ordena mais recente primeiro.
+    mine.slice().sort((a, b) => b.ts - a.ts).forEach((msg) => {
+      const tile = document.createElement("div");
+      tile.className = "gallery-tile";
+      const isVideo = isVideoName(msg.file_name);
+      const media = document.createElement(isVideo ? "video" : "img");
+      media.src = "/files/" + msg.id + "/view";
+      if (isVideo) {
+        media.muted = true;
+        media.preload = "metadata"; // mostra o 1º quadro como miniatura, sem baixar o vídeo todo
+      }
+      tile.appendChild(media);
+      if (isVideo) {
+        const badge = document.createElement("div");
+        badge.className = "gallery-video-badge";
+        badge.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="#fff"><polygon points="5,3 21,12 5,21"></polygon></svg>';
+        tile.appendChild(badge);
+      }
+      tile.addEventListener("click", () => openMediaViewer(msg, isVideo));
+      galleryGrid.appendChild(tile);
+    });
+
+    const addTile = document.createElement("div");
+    addTile.className = "gallery-add-tile";
+    addTile.title = "Adicionar à galeria";
+    addTile.innerHTML = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#7B2CBF" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>';
+    addTile.addEventListener("click", () => {
+      closeProfile();
+      fileInput.click();
+    });
+    galleryGrid.appendChild(addTile);
+
+    if (mine.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "gallery-empty";
+      empty.textContent = "As fotos e vídeos que você enviar em qualquer conversa aparecem aqui.";
+      galleryGrid.insertBefore(empty, galleryGrid.firstChild);
+    }
+  }
+
+  function openMediaViewer(msg, isVideo) {
+    mediaViewerContent.innerHTML = "";
+    const media = document.createElement(isVideo ? "video" : "img");
+    media.src = "/files/" + msg.id + "/view";
+    if (isVideo) { media.controls = true; media.autoplay = true; }
+    mediaViewerContent.appendChild(media);
+    mediaViewer.classList.remove("hidden");
+  }
+
+  function closeMediaViewer() {
+    mediaViewer.classList.add("hidden");
+    mediaViewerContent.innerHTML = "";
+  }
+
+  function switchProfileTab(tab) {
+    profileTabs.forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
+    profileTabGaleria.classList.toggle("hidden", tab !== "galeria");
+    profileTabSobre.classList.toggle("hidden", tab !== "sobre");
+  }
+
+  async function openProfile() {
+    profileAvatarBig.textContent = avatarInitial();
+    profileNameEl.textContent = myName() || "Alguém";
+    aboutName.textContent = myName() || "Alguém";
+    await ensureMyIdentity();
+    aboutNodeId.textContent = myNodeId || "—";
+    syncProfileModeBadge();
+    switchProfileTab("galeria");
+    renderGallery();
+    profileScreen.classList.remove("hidden");
+  }
+
+  function closeProfile() {
+    profileScreen.classList.add("hidden");
+  }
+
+  btnAvatar.addEventListener("click", () => {
+    btnAvatar.textContent = avatarInitial();
+    openProfile();
+  });
+  profileBack.addEventListener("click", closeProfile);
+  profileTabs.forEach((btn) => btn.addEventListener("click", () => switchProfileTab(btn.dataset.tab)));
+  mediaViewerClose.addEventListener("click", closeMediaViewer);
+  mediaViewer.addEventListener("click", (e) => { if (e.target === mediaViewer) closeMediaViewer(); });
+
   function paintMessage(msg) {
     if (messagesEl.querySelector(`[data-id="${msg.id}"]`)) return;
     const mine = msg.sender_id === senderId();
@@ -859,6 +997,7 @@
   function showChat() {
     nameScreen.classList.add("hidden");
     chatScreen.classList.remove("hidden");
+    btnAvatar.textContent = avatarInitial();
     loadHistory();
     loadGroups();
     connectSocket();
