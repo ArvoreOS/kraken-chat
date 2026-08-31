@@ -965,10 +965,23 @@
       form.append("scope", "global");
     }
     statusText.textContent = "enviando…";
-    const res = await fetch("/api/upload", { method: "POST", body: form });
-    const data = await res.json();
-    if (data.ok) addMessage(data.message);
-    else alert(data.error || "erro ao enviar");
+    // Achado real 2026-08-30: aqui não tinha try/catch nenhum. Se o fetch
+    // falhasse por qualquer motivo (Blob de content:// URI ilegível, rede
+    // caindo no meio, resposta que não é JSON), a promise rejeitava sem
+    // ninguém pegar - zero alerta, mensagem nunca aparecia, e o "enviando…"
+    // só saía do ar porque pollPeers (relógio separado, a cada 5s) pisava
+    // por cima do texto sem relação nenhuma com o upload em si. Isso fazia
+    // parecer que "ficou enviando e não foi" sem nunca mostrar o erro real.
+    try {
+      const res = await fetch("/api/upload", { method: "POST", body: form });
+      const data = await res.json();
+      if (data.ok) addMessage(data.message);
+      else alert(data.error || "erro ao enviar");
+    } catch (e) {
+      alert("erro ao enviar: " + (e && e.message ? e.message : e));
+    } finally {
+      pollPeers();
+    }
   }
 
   fileInput.addEventListener("change", async () => {
