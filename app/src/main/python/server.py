@@ -1167,6 +1167,63 @@ def api_call_relay_who_is_online():
         }))
 
 
+# ---------- presença de chamada resiliente à WebView (2026-08-31) ----------
+# Achado real, investigando por que a Gleice nunca aparecia em "quem
+# chamar" mesmo trocando mensagem de texto normalmente com o Gilcimar:
+# `callRelayHeartbeat()` (app.js) é um `setInterval` rodando DENTRO da
+# WebView - o Chromium/WebView reduz drasticamente (ou pausa de vez) esse
+# tipo de timer quando a página fica em segundo plano/tela apagada, mesmo
+# com o KrakenService (processo nativo, foreground service) continuando
+# 100% vivo. Prova ao vivo: consultado `/api/call/relay/who_is_online` no
+# nó-semente em produção, só o Gilcimar aparecia - a Gleice, que tinha
+# acabado de mandar mensagem de texto minutos antes (sincronizada pelo
+# processo nativo, que nunca para), não estava lá.
+#
+# O sync de mensagens nunca teve esse problema porque roda inteiramente
+# no processo nativo (threads Python puras, `_sync_loop` etc) - nunca
+# depende da WebView estar em primeiro plano. Esse loop aqui aplica o
+# mesmo princípio pra presença de chamada: manda o heartbeat direto do
+# Python, sem depender de JS nenhum rodando. Continua existindo o
+# heartbeat da WebView também (não removido) - quando a WebView está em
+# primeiro plano os dois convivem sem problema, redundância inofensiva.
+_current_mode = "on"  # espelha o kraken_mode do localStorage - ver /api/set_mode
+
+
+@app.route("/api/set_mode", methods=["POST"])
+def api_set_mode():
+    """mode.js avisa aqui toda vez que o interruptor ON/OFF muda, e uma vez
+    no carregamento da página - sem isso, esse processo Python nasceria
+    sempre assumindo "on" mesmo que a pessoa já tivesse escolhido OFF numa
+    sessão anterior (o estado mora no localStorage, que o backend nunca
+    vê sozinho)."""
+    global _current_mode
+    data = request.get_json(force=True) or {}
+    _current_mode = "off" if data.get("mode") == "off" else "on"
+    return jsonify({"ok": True})
+
+
+def _native_presence_heartbeat_loop():
+    while True:
+        time.sleep(5)
+        if _current_mode == "off":
+            continue
+        if not BOOTSTRAP_PEERS_RAW or not SEED_HTTP_URL:
+            continue  # sem nó-semente configurado (ex: o próprio nó-semente)
+        try:
+            import urllib.request
+            body = json.dumps({"node_id": NODE_ID, "name": mesh.display_name or "Alguém"}).encode()
+            req = urllib.request.Request(
+                f"{SEED_HTTP_URL}/api/call/relay/heartbeat", data=body, method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=10)
+        except OSError:
+            pass
+
+
+threading.Thread(target=_native_presence_heartbeat_loop, daemon=True).start()
+
+
 def _relay_push(kind):
     data = request.get_json(force=True) or {}
     to_id = data.get("to_id")
@@ -1481,7 +1538,72 @@ def api_upload():
     store.add_message(msg, has_file=True)
     broadcast_new_message(msg)
     mesh.sync_now()
+    _push_file_to_seed_async(msg_id, data)
     return jsonify({"ok": True, "message": msg})
+
+
+# ---------- entrega de arquivo NAT-safe: quem manda empurra, não espera ser puxado ----------
+# Limitação de arquitetura conhecida há tempo neste projeto (ver
+# MEMORY.md/Obsidian): texto atravessa o modo híbrido perfeitamente, mas
+# arquivo/áudio não, quando o remetente está atrás de NAT - o que é
+# praticamente todo celular (dado móvel quase sempre tem CGNAT, e a
+# maioria das redes domésticas não tem port forward configurado). O
+# nó-semente nunca consegue "puxar" o arquivo de volta de quem mandou,
+# porque só quem inicia a conexão consegue atravessar o NAT - e é sempre
+# o celular que inicia a conexão com o nó-semente, nunca o contrário.
+#
+# Confirmado com dado real em produção (2026-08-31): mensagem de áudio do
+# Gilcimar chegou certinho (metadado) no banco do nó-semente, mas os
+# bytes nunca chegaram no disco - exatamente esse gap, agora com prova
+# concreta em vez de só suspeita.
+#
+# Corrigido invertendo quem inicia: em vez de esperar o nó-semente puxar,
+# quem ACABOU de enviar um arquivo empurra os bytes direto pro nó-semente
+# na hora, por HTTP simples (POST) - a mesma direção "de dentro pra fora"
+# que já atravessa qualquer NAT (é como o app já fala com o nó-semente
+# pra tudo mais: sync, chamada relay, live). Roda numa thread separada
+# (não atrasa a resposta de /api/upload) e é "melhor esforço" - se
+# falhar (sem internet agora, nó-semente fora do ar), os mecanismos que
+# já existiam (retry por LAN, sync normal) continuam valendo do jeito que
+# já funcionavam antes, sem regressão nenhuma.
+def _push_file_to_seed(msg_id, data):
+    if not BOOTSTRAP_PEERS_RAW or not SEED_HTTP_URL:
+        return  # sem nó-semente configurado (ex: rodando no próprio nó-semente)
+    import urllib.request
+    url = f"{SEED_HTTP_URL}/api/push_file/{msg_id}"
+    try:
+        req = urllib.request.Request(url, data=data, method="POST",
+                                      headers={"Content-Type": "application/octet-stream"})
+        urllib.request.urlopen(req, timeout=30)
+    except OSError:
+        pass  # melhor esforço - retry por LAN/sync normal continuam valendo
+
+
+def _push_file_to_seed_async(msg_id, data):
+    threading.Thread(target=_push_file_to_seed, args=(msg_id, data), daemon=True).start()
+
+
+@app.route("/api/push_file/<msg_id>", methods=["POST"])
+def api_push_file(msg_id):
+    """Recebe o empurrão acima. Só aceita pra uma mensagem que JÁ existe
+    (chegou por gossip normal antes ou ao mesmo tempo) - nunca cria
+    mensagem nova por essa rota, só completa o arquivo de uma que já é
+    conhecida. Idempotente: se os bytes já estão em disco (outra fonte já
+    entregou), não escreve de novo."""
+    data = request.get_data()
+    if not data:
+        return jsonify({"ok": False, "error": "corpo vazio"}), 400
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT file_name FROM messages WHERE id=?", (msg_id,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"ok": False, "error": "mensagem desconhecida (ainda não sincronizou?)"}), 404
+    local_path = FILES_DIR / f"{msg_id}_{row['file_name']}"
+    if not local_path.exists():
+        local_path.write_bytes(data)
+        store.mark_has_file(msg_id)
+    return jsonify({"ok": True})
 
 
 @app.route("/files/<msg_id>")

@@ -44,6 +44,19 @@
     document.querySelectorAll("[data-mode-only]").forEach((el) => {
       el.hidden = el.dataset.modeOnly !== m;
     });
+    // Achado real 2026-08-31: o servidor local (Python, sempre rodando em
+    // 1º plano mesmo com a tela apagada) também precisa saber o modo atual
+    // - ele agora manda presença de chamada sozinho por fora da WebView
+    // (ver "presença de chamada resiliente" no server.py), e precisa
+    // respeitar OFF do mesmo jeito que a WebView já respeita. O servidor
+    // nasce assumindo "on" por padrão - avisa toda vez que o modo muda E
+    // uma vez no carregamento da página, pra sincronizar com o que já
+    // estava salvo no localStorage de uma sessão anterior.
+    fetch("/api/set_mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: m }),
+    }).catch(() => {});
   }
 
   function setMode(m) {
