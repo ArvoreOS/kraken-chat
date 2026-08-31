@@ -43,6 +43,7 @@ import nacl.secret
 import nacl.utils
 from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 from flask_socketio import SocketIO
+from werkzeug.exceptions import HTTPException
 from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -861,6 +862,34 @@ socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 # bugs reais no app de verdade - v37/v38) e foram desativados e apagados
 # a pedido do Gilcimar em 2026-08-31, depois de tudo já confirmado
 # funcionando no app real.
+
+
+@app.errorhandler(Exception)
+def _api_errors_as_json(e):
+    """Achado real 2026-08-31: um celular novo mandava foto/áudio e via
+    "Unexpected token '<' ... is not valid JSON" - o `fetch()` do app.js
+    sempre espera JSON de volta de qualquer rota /api/*, mas um erro não
+    tratado (ou um erro esperado do próprio Flask/Werkzeug, tipo 413
+    "arquivo grande demais" ou 404) vira a página HTML padrão de erro,
+    que começa com "<!doctype" - daí o "Unexpected token '<'" (é o
+    JSON.parse tentando ler HTML). A mensagem genérica escondia a causa
+    real. Agora toda rota /api/* sempre devolve JSON, com o erro
+    verdadeiro dentro - inclusive os esperados do próprio Flask - pra
+    nunca mais precisar adivinhar. Rotas fora de /api/ (páginas HTML)
+    continuam comportando como sempre."""
+    if isinstance(e, HTTPException):
+        status = e.code or 500
+        error_txt = f"{e.code} {e.name}: {e.description}"
+    else:
+        status = 500
+        error_txt = f"{type(e).__name__}: {e}"
+        import traceback
+        print(f"[erro não tratado] {request.method} {request.path}:\n{traceback.format_exc()}")
+    if request.path.startswith("/api/"):
+        return jsonify({"ok": False, "error": error_txt}), status
+    if isinstance(e, HTTPException):
+        return e
+    return Response(f"Erro interno: {error_txt}", status=500, mimetype="text/plain")
 
 
 @app.after_request
