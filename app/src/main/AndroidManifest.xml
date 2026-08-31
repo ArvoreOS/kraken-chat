@@ -12,6 +12,15 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Achado real 2026-08-31 (pesquisa web, casos idênticos em outros apps
+         WebView Android - expo/react-native-webview/capacitor): sem essa
+         permissão, o subsistema de áudio do Android nega o microfone pro
+         WebView mesmo com RECORD_AUDIO concedido - causa raiz real do
+         "NotReadableError: Could not start audio source" reportado ao vivo
+         dentro do Kraken (não era vazamento de sessão, era permissão
+         faltando desde sempre). Permissão "normal" (não perigosa), o
+         sistema concede sozinho na instalação, sem diálogo nenhum. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />

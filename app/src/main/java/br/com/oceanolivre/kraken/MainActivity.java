@@ -35,6 +35,17 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // Debug remoto via chrome://inspect no PC (cabo USB + Depuração USB
+        // ligada no celular) - achado real 2026-08-31: até aqui não tinha
+        // como ver o console/DevTools de verdade do WebView rodando dentro
+        // do app, só o texto de alert()/confirm() - isso escondia o erro
+        // técnico completo em vários bugs investigados essa semana. Só em
+        // build debug (BuildConfig.DEBUG) - nunca em release, por segurança
+        // (exporia o conteúdo do WebView pra qualquer um com acesso USB).
+        if (BuildConfig.DEBUG) {
+            WebView.setWebContentsDebuggingEnabled(true);
+        }
+
         webView = new WebView(this);
         setContentView(webView);
 
