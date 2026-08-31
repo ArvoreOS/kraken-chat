@@ -381,6 +381,9 @@
   }
 
   async function callRelayHeartbeat() {
+    // Modo OFF (interruptor 2026-08-31) ignora a internet de propósito,
+    // mesmo se disponível - chamada é recurso só do modo ON.
+    if (window.KrakenMode && window.KrakenMode.get() === "off") return;
     await ensureMyIdentity();
     if (!myNodeId || !seedHttpUrl) return;
     try {
@@ -395,6 +398,7 @@
   }
 
   async function callRelayPoll() {
+    if (window.KrakenMode && window.KrakenMode.get() === "off") return;
     await ensureMyIdentity();
     if (!myNodeId || !seedHttpUrl) return;
     try {
