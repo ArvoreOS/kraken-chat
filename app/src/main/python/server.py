@@ -683,9 +683,10 @@ class MeshNode:
     def _handle_gossip_conn(self, conn):
         attempt_ts = time.time()
         try:
-            peer_key = conn.getpeername()[0]
+            peer_ip = conn.getpeername()[0]
         except OSError:
-            peer_key = "?"
+            peer_ip = None
+        peer_key = peer_ip or "?"
         try:
             conn.settimeout(10)
 
@@ -694,9 +695,11 @@ class MeshNode:
             # decifrar mensagens diretas endereçadas a ele/dele mais tarde.
             peer_hello = self._recv_json(conn)
             self._send_json(conn, {"node_id": self.node_id, "pubkey": _my_pubkey_b64(), "name": self.display_name, "http_port": HTTP_PORT})
+            peer_http_port = HTTP_PORT
             if isinstance(peer_hello, dict):
                 peer_key = peer_hello.get("node_id") or peer_key
                 store.remember_node(peer_hello.get("node_id"), peer_hello.get("pubkey"), peer_hello.get("name", ""))
+                peer_http_port = peer_hello.get("http_port") or HTTP_PORT
 
             their_ids = set(self._recv_json(conn))
             my_ids = store.all_ids()
@@ -706,8 +709,26 @@ class MeshNode:
             my_ids_msg = self._recv_json(conn)
             self._send_json(conn, list(my_ids))
             new_msgs = self._recv_json(conn)
+            # Achado real 2026-08-31: _ingest_message() só busca o arquivo
+            # de verdade quando recebe `fetch_from` - o parâmetro
+            # `conn_for_file` que existia aqui era aceito pela função mas
+            # NUNCA lido dentro dela (parâmetro morto, provavelmente um
+            # mecanismo planejado - buscar pela própria conexão já aberta -
+            # que nunca chegou a ser implementado). Resultado real: toda vez
+            # que um nó (o celular) empurrava uma mensagem nova de
+            # arquivo/áudio pra este nó (a Oracle, que nunca inicia sync
+            # sozinha - só recebe, por isso essa direção do código é a
+            # única que importa no modo híbrido), o AVISO da mensagem
+            # chegava certinho mas o ARQUIVO em si nunca era buscado -
+            # ficava pra sempre como "mensagem existe, bytes não". Batia
+            # exatamente com o sintoma relatado (Gilcimar mandou 2 áudios
+            # reais, os dois apareceram no banco mas 404 em /files/.../view).
+            # Corrigido usando o mesmo mecanismo que já funciona no sentido
+            # contrário (_sync_with_peer, linha ~752) - IP da conexão já
+            # aberta + http_port que o peer manda no próprio hello.
+            fetch_from = {"ip": peer_ip, "http_port": peer_http_port} if peer_ip else None
             for msg in new_msgs:
-                self._ingest_message(msg, conn_for_file=conn)
+                self._ingest_message(msg, fetch_from=fetch_from)
             self._record_incoming(peer_key, attempt_ts, ok=True)
         except (OSError, ValueError, ConnectionError, KeyError, sqlite3.Error) as e:
             self._record_incoming(peer_key, attempt_ts, ok=False, error=f"{type(e).__name__}: {e}")
@@ -749,7 +770,7 @@ class MeshNode:
             self._send_json(conn, list(my_ids))
             missing_for_me = self._recv_json(conn)
             for msg in missing_for_me:
-                self._ingest_message(msg, conn_for_file=None, fetch_from=info)
+                self._ingest_message(msg, fetch_from=info)
 
             # Precisa mandar antes de receber aqui - o servidor (_handle_gossip_conn)
             # está bloqueado esperando este recv_json antes de mandar their_ids;
@@ -764,7 +785,7 @@ class MeshNode:
         except (OSError, ValueError, ConnectionError, KeyError, sqlite3.Error) as e:
             self._record_sync(peer_id, attempt_ts, ok=False, error=f"{type(e).__name__}: {e}")
 
-    def _ingest_message(self, msg, conn_for_file=None, fetch_from=None):
+    def _ingest_message(self, msg, fetch_from=None):
         is_new = store.add_message(msg, has_file=(msg.get("kind") not in ("file", "audio")))
         if msg.get("kind") in ("file", "audio"):
             local_path = FILES_DIR / f"{msg['id']}_{msg['file_name']}"
