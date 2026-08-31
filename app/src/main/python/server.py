@@ -979,12 +979,47 @@ def _cors(resp):
     return resp
 
 
+# Fila de reforço pra chamada LOCAL (2026-08-31, achado real) - até aqui
+# /api/call/offer|answer|reject|hangup avisavam só por socketio.emit(), um
+# "empurrão" sem fila e sem repetição: se o WebView de quem recebe não
+# tiver uma conexão Socket.IO viva bem naquele instante exato (ex: acabou
+# de reconectar, layout ainda montando), o evento passa batido pra sempre
+# - ninguém pergunta de novo depois. Reportado ao vivo pelo Gilcimar:
+# quem ligou viu "Chamando..." normal (a oferta chegou), quem estava
+# sendo chamado - com o app aberto e tela ligada - não viu nada.
+#
+# A chamada À DISTÂNCIA (via relay, embaixo) nunca teve esse problema
+# porque já usa fila + consulta repetida (_pending_relay_events +
+# /api/call/relay/poll) - o mesmo princípio agora reforça a local também,
+# mantendo o socketio.emit() como está (ainda é o caminho mais rápido
+# quando funciona, a fila é só a rede de segurança pra quando não dá).
+_pending_local_call_events = []
+_pending_local_call_lock = threading.Lock()
+_LOCAL_EVENT_TTL = 30  # eventos locais são efêmeros - se ninguém buscar em 30s, descarta
+
+
+def _queue_local_event(kind, data):
+    now = time.time()
+    with _pending_local_call_lock:
+        _pending_local_call_events[:] = [e for e in _pending_local_call_events if now - e["ts"] < _LOCAL_EVENT_TTL]
+        _pending_local_call_events.append({"kind": kind, "data": data, "ts": now})
+
+
+@app.route("/api/call/local_poll")
+def api_call_local_poll():
+    with _pending_local_call_lock:
+        events = list(_pending_local_call_events)
+        _pending_local_call_events.clear()
+    return _cors(jsonify({"events": events}))
+
+
 @app.route("/api/call/offer", methods=["POST", "OPTIONS"])
 def api_call_offer():
     if request.method == "OPTIONS":
         return _cors(Response(status=204))
     data = request.get_json(force=True) or {}
     socketio.emit("incoming_call", data)
+    _queue_local_event("incoming_call", data)
     return _cors(jsonify({"ok": True}))
 
 
@@ -994,6 +1029,7 @@ def api_call_answer():
         return _cors(Response(status=204))
     data = request.get_json(force=True) or {}
     socketio.emit("call_answered", data)
+    _queue_local_event("call_answered", data)
     return _cors(jsonify({"ok": True}))
 
 
@@ -1003,6 +1039,7 @@ def api_call_reject():
         return _cors(Response(status=204))
     data = request.get_json(force=True) or {}
     socketio.emit("call_rejected", data)
+    _queue_local_event("call_rejected", data)
     return _cors(jsonify({"ok": True}))
 
 
@@ -1012,6 +1049,7 @@ def api_call_hangup():
         return _cors(Response(status=204))
     data = request.get_json(force=True) or {}
     socketio.emit("call_hangup", data)
+    _queue_local_event("call_hangup", data)
     return _cors(jsonify({"ok": True}))
 
 

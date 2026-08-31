@@ -416,11 +416,37 @@
     }
   }
 
+  // Reforço de segurança pra chamada LOCAL (2026-08-31, achado real): até
+  // aqui só existia o "empurrão" via Socket.IO (socket.on abaixo) - se
+  // esse aviso passasse batido por qualquer motivo (conexão reconectando
+  // bem naquele instante, por exemplo), ninguém perguntava de novo depois
+  // e a chamada nunca aparecia pra quem ia atender, mesmo com o app
+  // aberto. Mesmo princípio que já protege a chamada à distância
+  // (callRelayPoll) - consulta o próprio servidor local (sempre a mesma
+  // origem, "/api/call/local_poll") a cada 1,5s.
+  async function callLocalPoll() {
+    if (window.KrakenMode && window.KrakenMode.get() === "off") return;
+    try {
+      const res = await fetch("/api/call/local_poll");
+      const data = await res.json();
+      for (const ev of data.events || []) {
+        if (ev.kind === "incoming_call") handleIncomingCall(ev.data);
+        else if (ev.kind === "call_answered") handleCallAnswered(ev.data);
+        else if (ev.kind === "call_rejected") handleCallRejected(ev.data);
+        else if (ev.kind === "call_hangup") handleCallHangup(ev.data);
+      }
+    } catch (e) {
+      // falha momentânea - tenta de novo no próximo ciclo
+    }
+  }
+
   function startCallRelayLoop() {
     callRelayHeartbeat();
     callRelayPoll();
+    callLocalPoll();
     setInterval(callRelayHeartbeat, 5000);
     setInterval(callRelayPoll, 2000);
+    setInterval(callLocalPoll, 1500);
   }
 
   function handleIncomingCall(data) {
@@ -503,6 +529,12 @@
 
   async function handleCallAnswered(data) {
     if (!callState || callState.call_id !== data.call_id || !callState.pc) return;
+    // Achado real 2026-08-31: com o reforço de consulta local (mesmo
+    // evento podendo chegar 2x, uma via Socket.IO e outra via poll de
+    // segurança), setRemoteDescription() na 2ª vez lançaria
+    // InvalidStateError (já tem descrição remota) - ignora em silêncio,
+    // já processou a resposta certa na 1ª chegada.
+    if (callState.pc.currentRemoteDescription) return;
     await callState.pc.setRemoteDescription(data.sdp);
     callStatusText.textContent = callState.semAudio
       ? `Em chamada com ${callState.peer.name} (sem áudio - microfone ocupado)`
