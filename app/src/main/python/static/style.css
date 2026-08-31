@@ -107,6 +107,7 @@ body {
 }
 .btn.verde { background: var(--verde); }
 .btn.roxo { background: var(--roxo); }
+.btn.vermelho { background: var(--vermelho); }
 .btn.small { padding: 8px 14px; font-size: 13px; text-decoration: none; }
 
 /* ---------- tela de chat ---------- */

@@ -143,7 +143,8 @@
   const callRejectBtn = document.getElementById("call-reject-btn");
   const callHangupBtn = document.getElementById("call-hangup-btn");
   const callMuteBtn = document.getElementById("call-mute-btn");
-  const btnLive = document.getElementById("btn-live");
+  const btnCall = document.getElementById("btn-call");
+  const btnBroadcast = document.getElementById("btn-broadcast");
   const btnGroupInvite = document.getElementById("btn-group-invite");
 
   let callState = null; // {call_id, role, pc, localStream, peer:{id,name,via,ip?,port?}, pendingOffer?}
@@ -577,7 +578,20 @@
     setTimeout(callReset, 1500);
   }
 
-  btnLive.addEventListener("click", openPeerPicker);
+  btnCall.addEventListener("click", openPeerPicker);
+  // Botão de Live de verdade (transmitir pra plateia, tipo TikTok) -
+  // 2026-08-31, ainda não ligado no Janus (SFU rodando na Oracle, mas
+  // sem ponte de sinalização com o Kraken ainda) - por enquanto só avisa
+  // honestamente que está em construção, em vez de fingir que funciona.
+  btnBroadcast.addEventListener("click", () => {
+    openModal(`
+      <h3>🔴 Live</h3>
+      <p class="muted">Ainda em construção - o servidor de transmissão já está rodando,
+      falta ligar ele aqui dentro do Kraken.</p>
+      <button id="modal-close-btn" class="btn roxo">Entendi</button>
+    `);
+    document.getElementById("modal-close-btn").addEventListener("click", closeModal);
+  });
   callAcceptBtn.addEventListener("click", acceptCall);
   callRejectBtn.addEventListener("click", rejectCall);
   callHangupBtn.addEventListener("click", hangupCall);
