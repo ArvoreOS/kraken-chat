@@ -626,7 +626,16 @@ class MeshNode:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         while True:
-            payload = f"CRAQUE_HELLO|{self.node_id}|{GOSSIP_PORT}|{self.display_name}"
+            # Achado real 2026-08-31: o broadcast só anunciava GOSSIP_PORT
+            # (8892, protocolo de sincronização binário) - a chamada de
+            # vídeo LOCAL (callSignal em app.js) reusava esse mesmo número
+            # como se fosse a porta HTTP (5000), tentando falar HTTP direto
+            # com o servidor de gossip, que não entende esse protocolo -
+            # "não consegue conectar ao nó" mesmo com os dois celulares se
+            # enxergando perfeitamente pro chat (a sincronização em si usa
+            # a porta certa, só a chamada reaproveitava errado). Corrigido
+            # mandando a porta HTTP separada, como 5º campo.
+            payload = f"CRAQUE_HELLO|{self.node_id}|{GOSSIP_PORT}|{self.display_name}|{HTTP_PORT}"
             for addr in self._directed_broadcast_addrs():
                 try:
                     s.sendto(payload.encode(), (addr, DISCOVERY_PORT))
@@ -642,14 +651,24 @@ class MeshNode:
             try:
                 data, addr = s.recvfrom(1024)
                 parts = data.decode(errors="ignore").split("|")
-                if len(parts) != 4 or parts[0] != "CRAQUE_HELLO":
+                # Aceita o formato antigo (4 campos, sem porta HTTP - de um
+                # peer que ainda não atualizou) além do novo (5 campos) -
+                # sem isso, um celular desatualizado do lado de fora vira
+                # invisível pros atualizados enquanto a rede não termina de
+                # atualizar toda. Sem o 5º campo, assume o padrão do Android
+                # (5000) - bate na quase totalidade dos casos reais.
+                if len(parts) not in (4, 5) or parts[0] != "CRAQUE_HELLO":
                     continue
-                _, peer_id, tcp_port, name = parts
+                if len(parts) == 5:
+                    _, peer_id, tcp_port, name, http_port = parts
+                else:
+                    _, peer_id, tcp_port, name = parts
+                    http_port = HTTP_PORT
                 if peer_id == self.node_id:
                     continue
                 with self.lock:
                     self.peers[peer_id] = {
-                        "ip": addr[0], "port": int(tcp_port),
+                        "ip": addr[0], "port": int(tcp_port), "http_port": int(http_port),
                         "name": name, "last_seen": time.time(),
                     }
             except OSError:

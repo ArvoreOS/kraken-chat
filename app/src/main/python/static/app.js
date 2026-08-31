@@ -288,9 +288,14 @@
 
     // Nós-semente (bootstrap) não têm ninguém de verdade atendendo do outro
     // lado - ligar pra eles só ficaria chamando pra sempre sem resposta.
+    // Achado real 2026-08-31: p.port aqui é a porta de SINCRONIZAÇÃO
+    // (gossip, 8892) - a chamada usa HTTP de verdade, então precisa de
+    // p.http_port (novo campo no /api/peers, servidor manda desde a
+    // descoberta agora). Fallback pro padrão do Android (5000) se for um
+    // peer antigo que ainda não anuncia http_port.
     const lanPeers = (data.peers || [])
       .filter((p) => !p.id.startsWith("bootstrap-"))
-      .map((p) => ({ id: p.id, name: p.name || "Nó", via: "lan", ip: p.ip, port: p.port }));
+      .map((p) => ({ id: p.id, name: p.name || "Nó", via: "lan", ip: p.ip, port: p.http_port || 5000 }));
 
     let relayPeers = [];
     try {
