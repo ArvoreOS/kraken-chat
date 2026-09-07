@@ -103,6 +103,18 @@ SEED_HTTP_URL = os.environ.get("KRAKEN_SEED_HTTP_URL", "http://136.248.100.20:70
 # de quem assiste, que negociam WebRTC direto com o Janus (mesmo princípio
 # das chamadas 1-a-1: o vídeo nunca passa por dentro do server.py).
 JANUS_HTTP_URL = os.environ.get("KRAKEN_JANUS_HTTP_URL", "http://136.248.100.20:8088/janus")
+# Carteira Exaguinon de verdade (2026-09-07) - o Oceano Livre já roda um
+# livro-razão bem mais maduro que o Estágio 1 daqui (histórico de
+# transação, transferência entre contas) na MESMA VM do nó-semente,
+# porta 5301 (`oceano_livre_app/server.py`, serviço `oceano-livre`).
+# Achado do Gilcimar: "acho que já temos uma carteira no Oceano Livre" -
+# confirmado, e por rodar na mesma máquina, fala por `localhost` (nunca
+# exposto pra internet - as rotas de mexer em saldo lá não têm
+# autenticação nenhuma ainda, só é seguro por não estar alcançável de
+# fora). Só o nó-semente (rodando fisicamente nessa VM) consegue de
+# verdade chegar nesse endereço - um celular comum nunca vai conseguir
+# (é sempre localhost, "ele mesmo").
+OCEANO_LIVRE_URL = os.environ.get("KRAKEN_OCEANO_LIVRE_URL", "http://localhost:5301")
 
 try:
     # No Termux/desktop, BASE_DIR/data é sempre gravável. No Android/Chaquopy,
@@ -588,13 +600,15 @@ class Store:
         row = conn.execute("SELECT * FROM gifts WHERE id=?", (gift_id,)).fetchone()
         return dict(row) if row else None
 
-    def redeem_gift(self, gift_id, email, name):
-        """Resgata um presente - marca como resgatado e credita o valor.
-        Idempotente/seguro contra corrida: o UPDATE só afeta linha se
-        `resgatado=0` ainda, então duas tentativas simultâneas (ex: dois
-        cliques rápidos, ou dois dispositivos tentando resgatar o mesmo
-        presente de grupo ao mesmo tempo) nunca creditam duas vezes -
-        `rowcount` conta quantas linhas o UPDATE realmente mudou."""
+    def claim_gift(self, gift_id, email, name):
+        """Marca o presente como resgatado - só o TRAVAMENTO local, não
+        credita nada (isso é feito à parte pela rota, chamando o Oceano
+        Livre de verdade - ver seção 'carteira Exaguinon'). Idempotente/
+        seguro contra corrida: o UPDATE só afeta linha se `resgatado=0`
+        ainda, então duas tentativas simultâneas (dois cliques rápidos,
+        ou dois dispositivos tentando resgatar o mesmo presente de grupo
+        ao mesmo tempo) nunca passam das duas - `rowcount` conta quantas
+        linhas o UPDATE realmente mudou."""
         conn = self._conn()
         cur = conn.execute(
             "UPDATE gifts SET resgatado=1, resgatado_por_email=?, resgatado_por_name=?, resgatado_ts=? "
@@ -602,10 +616,21 @@ class Store:
             (email, name, time.time(), gift_id),
         )
         conn.commit()
-        if cur.rowcount == 0:
-            return False  # já tinha sido resgatado (ou não existe)
-        self.creditar(email, self.get_gift(gift_id)["valor"])
-        return True
+        return cur.rowcount > 0
+
+    def unclaim_gift(self, gift_id):
+        """Desfaz a marca de resgatado - usado só quando o crédito de
+        verdade no Oceano Livre falha DEPOIS do travamento local (ex:
+        Oceano Livre ficou fora do ar bem naquele instante) - sem isso o
+        presente ficaria travado como 'resgatado' pra sempre sem ninguém
+        ter recebido o valor de verdade."""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE gifts SET resgatado=0, resgatado_por_email=NULL, resgatado_por_name=NULL, resgatado_ts=NULL "
+            "WHERE id=?",
+            (gift_id,),
+        )
+        conn.commit()
 
     # ---------- grupos ----------
     def create_group(self, group_id, name, kind, key):
@@ -1125,11 +1150,11 @@ def api_auth_register():
         return _cors(jsonify({"ok": False, "error": "senha precisa de pelo menos 6 caracteres"})), 400
     if not name:
         return _cors(jsonify({"ok": False, "error": "nome obrigatório"})), 400
-    # Saldo de teste (Estágio 1 da carteira Exaguinon, 2026-09-07) - conta
-    # nova já nasce com 1000 "on" DE TESTE (deixado bem claro na UI que não
-    # é dinheiro real) pra dar pra testar a mecânica de presentear sem
-    # precisar minerar nada ainda - ver [[project_exaguinon]].
-    ok = store.create_account(email, generate_password_hash(password), name, saldo_inicial=1000)
+    # ⚠️ `saldo` daqui é vestigial (Estágio 1, superado no mesmo dia) - o
+    # saldo de verdade agora mora no Oceano Livre, que dá seu próprio
+    # bônus de boas-vindas (1000 "on" de teste) na primeira vez que a
+    # conta é tocada por lá. Não duplicar o bônus aqui.
+    ok = store.create_account(email, generate_password_hash(password), name)
     if not ok:
         return _cors(jsonify({"ok": False, "error": "esse e-mail já tem conta"})), 409
     token = store.create_session(email)
@@ -1150,24 +1175,57 @@ def api_auth_login():
     return _cors(jsonify({"ok": True, "name": account["name"], "token": token, "saldo": account["saldo"]}))
 
 
-# ---------- carteira Exaguinon (Estágio 1, 2026-09-07) ----------
+# ---------- carteira Exaguinon - ligada de verdade ao Oceano Livre (2026-09-07) ----------
 # Pedido do Gilcimar: unificar Oceano Livre + Kraken usando o Exaguinon
-# ("on") como moeda interna compartilhada - "presentear" alguém no Kraken.
-# Estágio 1 (ESTE código): testar só a LÓGICA - livro-razão simples aqui
-# no nó-semente (mesma tabela accounts do login, é a única "autoridade
-# sempre online" - um celular comum tem essa tabela vazia/sem uso, igual
-# já acontece com login e chamada relay). NENHUMA blockchain envolvida
-# ainda - saldo é só um número no SQLite, deixado bem claro na UI que é
-# "on de teste". Estágio 2 (futuro, não implementado) trocaria isso por
-# uma carteira custodiada de verdade no contrato OnGuinExa (testnet Amoy),
-# sem precisar mudar a mecânica de presente/resgate em si.
+# ("on") como moeda interna compartilhada - "presentear" alguém no
+# Kraken. Estágio 1 (mesma sessão) tinha construído um livro-razão
+# PRÓPRIO aqui no Kraken pra testar a lógica rápido - Gilcimar então
+# perguntou "não temos já uma carteira no Oceano Livre?" e sim: o Oceano
+# Livre roda um livro-razão bem mais maduro (histórico de transação,
+# transferência entre contas) na MESMA VM, porta 5301. Trocado agora pra
+# usar ESSA carteira de verdade em vez da própria - login do Kraken
+# continua provando quem é você, mas o saldo real mora só no Oceano
+# Livre. A tabela `gifts` daqui vira só coordenação (mensagem + trava de
+# "já foi resgatado"), nunca guarda valor.
 #
-# Presente = valor debitado na hora do envio (nunca fica "no ar" sem
-# dono), preso a um id de presente + uma mensagem de chat normal
-# (kind="gift") que carrega só o id/valor/mensagem - a mesma mensagem
-# sincroniza pela malha que já existe (texto/áudio/arquivo), mas resgatar
-# sempre fala direto com o nó-semente (precisa de internet, mesma
-# limitação que login já tem - não dá pra inventar dinheiro offline).
+# Presente = debita a conta de verdade no Oceano Livre na hora do envio
+# (nunca fica "no ar" sem dono) + mensagem de chat normal (kind="gift")
+# que sincroniza pela malha como qualquer outra - resgatar sempre fala
+# direto com o nó-semente, que fala com o Oceano Livre por localhost
+# (precisa de internet pro celular chegar no nó-semente, mesma limitação
+# que login já tem - não dá pra inventar dinheiro offline).
+def _oceano_livre_call(method, path, body=None):
+    """Chama o Oceano Livre (porta 5301, mesma VM) - só o nó-semente
+    consegue de verdade (é sempre `localhost`, roda os dois serviços).
+    Devolve (status_code, dict) - nunca lança, quem chama decide o que
+    fazer com erro de rede (ex: Oceano Livre fora do ar)."""
+    import urllib.request
+    import urllib.error
+    url = f"{OCEANO_LIVRE_URL}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Content-Type": "application/json"} if data else {},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode())
+        except Exception:
+            return e.code, {"erro": "resposta inválida do Oceano Livre"}
+    except OSError as e:
+        return 0, {"erro": f"Oceano Livre inalcançável: {e}"}
+
+
+def _garantir_conta_oceano_livre(email):
+    """POST /contas é idempotente (cria só se não existir, com bônus de
+    boas-vindas) - chamado antes de qualquer débito/consulta pra nunca
+    bater num 404 de conta desconhecida."""
+    return _oceano_livre_call("POST", "/contas", {"email": email})
+
+
 @app.route("/api/wallet/balance", methods=["POST", "OPTIONS"])
 def api_wallet_balance():
     if request.method == "OPTIONS":
@@ -1176,8 +1234,10 @@ def api_wallet_balance():
     email = store.get_session_email(data.get("token"))
     if not email:
         return _cors(jsonify({"ok": False, "error": "sessão expirada - faça login de novo"})), 401
-    account = store.get_account(email)
-    return _cors(jsonify({"ok": True, "saldo": account["saldo"] if account else 0}))
+    status, resp = _garantir_conta_oceano_livre(email)
+    if status == 0:
+        return _cors(jsonify({"ok": False, "error": resp["erro"]})), 502
+    return _cors(jsonify({"ok": True, "saldo": resp.get("saldo_on", 0)}))
 
 
 @app.route("/api/wallet/send_gift", methods=["POST", "OPTIONS"])
@@ -1197,8 +1257,19 @@ def api_wallet_send_gift():
     account = store.get_account(email)
     sender_name = account["name"] if account else "Alguém"
     mensagem = (data.get("mensagem") or "").strip()[:280]
-    if not store.debitar(email, valor):
-        return _cors(jsonify({"ok": False, "error": "saldo insuficiente"})), 400
+
+    status, resp = _garantir_conta_oceano_livre(email)
+    if status == 0:
+        return _cors(jsonify({"ok": False, "error": resp["erro"]})), 502
+    status, resp = _oceano_livre_call(
+        "POST", f"/contas/{email}/debitar",
+        {"quantidade_on": valor, "motivo": f"presente Kraken: {mensagem}" if mensagem else "presente Kraken"},
+    )
+    if status == 0:
+        return _cors(jsonify({"ok": False, "error": resp["erro"]})), 502
+    if status != 200:
+        return _cors(jsonify({"ok": False, "error": resp.get("erro", "não deu pra debitar")})), 400
+
     gift_id = uuid.uuid4().hex
     store.create_gift(gift_id, email, sender_name, valor, mensagem, msg_id=None)
     return _cors(jsonify({"ok": True, "gift_id": gift_id, "valor": valor, "mensagem": mensagem,
@@ -1221,8 +1292,24 @@ def api_wallet_redeem_gift():
         return _cors(jsonify({"ok": False, "error": "não dá pra resgatar seu próprio presente"})), 400
     account = store.get_account(email)
     name = account["name"] if account else "Alguém"
-    if not store.redeem_gift(gift_id, email, name):
+
+    # Trava local PRIMEIRO (idempotente via rowcount) - garante que duas
+    # tentativas simultâneas nunca passam as duas, antes de mexer em
+    # dinheiro de verdade no Oceano Livre.
+    if not store.claim_gift(gift_id, email, name):
         return _cors(jsonify({"ok": False, "error": "esse presente já foi resgatado"})), 409
+
+    status, resp = _garantir_conta_oceano_livre(email)
+    if status == 0:
+        store.unclaim_gift(gift_id)  # Oceano Livre fora do ar - desfaz a trava, deixa tentar de novo depois
+        return _cors(jsonify({"ok": False, "error": resp["erro"]})), 502
+    status, resp = _oceano_livre_call(
+        "POST", f"/contas/{email}/creditar",
+        {"quantidade_on": gift["valor"], "motivo": "presente Kraken recebido"},
+    )
+    if status != 200:
+        store.unclaim_gift(gift_id)
+        return _cors(jsonify({"ok": False, "error": resp.get("erro", "não deu pra creditar")})), 502
     return _cors(jsonify({"ok": True, "valor": gift["valor"]}))
 
 
