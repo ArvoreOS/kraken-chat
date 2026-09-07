@@ -157,6 +157,22 @@
   </div>
 </div>
 
+<!-- Mosaico de Lives (2026-09-07, pedido do Gilcimar) - assistir várias
+     transmissões ao vivo ao mesmo tempo, tipo parede de câmeras de
+     segurança. Cada quadrado é uma assinatura Janus independente. -->
+<div id="mosaic-screen" class="mosaic-screen hidden">
+  <div class="mosaic-header">
+    <span>🔲 Mosaico de Lives</span>
+    <div class="mosaic-size-picker">
+      <button type="button" id="mosaic-size-minus" class="btn roxo small">−</button>
+      <span id="mosaic-size-label">4</span>
+      <button type="button" id="mosaic-size-plus" class="btn roxo small">+</button>
+    </div>
+    <button type="button" id="mosaic-close-btn" class="btn vermelho small">✕ Fechar</button>
+  </div>
+  <div id="mosaic-grid" class="mosaic-grid"></div>
+</div>
+
 <script src="/static/mode.js"></script>
 <script src="/static/socket.io.min.js"></script>
 <script src="/static/janus.js"></script>

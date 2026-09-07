@@ -180,6 +180,12 @@
   const liveScreen = document.getElementById("live-screen");
   const liveVideo = document.getElementById("live-video");
   const liveStatusText = document.getElementById("live-status-text");
+  const mosaicScreen = document.getElementById("mosaic-screen");
+  const mosaicGrid = document.getElementById("mosaic-grid");
+  const mosaicSizeLabel = document.getElementById("mosaic-size-label");
+  const mosaicSizeMinus = document.getElementById("mosaic-size-minus");
+  const mosaicSizePlus = document.getElementById("mosaic-size-plus");
+  const mosaicCloseBtn = document.getElementById("mosaic-close-btn");
   const liveStopBtn = document.getElementById("live-stop-btn");
 
   let callState = null; // {call_id, role, pc, localStream, peer:{id,name,via,ip?,port?}, pendingOffer?}
@@ -669,6 +675,9 @@
     if (liveState && liveState.janusInstance) {
       try { liveState.janusInstance.destroy(); } catch (e) {}
     }
+    if (liveState && liveState.sub) {
+      liveState.sub.teardown();
+    }
     liveState = null;
     liveScreen.classList.add("hidden");
     liveVideo.srcObject = null;
@@ -686,8 +695,9 @@
   // sempre até o Android matar o processo. Encerra sozinho, tanto pra quem
   // transmite quanto pra quem assiste.
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden || !liveState) return;
-    liveReset();
+    if (!document.hidden) return;
+    if (liveState) liveReset();
+    if (mosaicCells.length) closeMosaic();
   });
 
   function joinAsPublisher(handle, room) {
@@ -836,6 +846,92 @@
     });
   }
 
+  // Assinatura Janus de UMA live, extraída do watchLive original
+  // (2026-09-07) pra reusar no Mosaico (várias assinaturas simultâneas,
+  // uma por quadrado) sem duplicar a lógica de WebRTC/Janus. Devolve um
+  // objeto com `teardown()` - quem chama é responsável por chamá-lo
+  // quando não precisar mais dessa assinatura específica.
+  function janusSubscribe(broadcaster, videoEl, onStatus, onFail) {
+    const sub = { janusInstance: null, handle: null, remoteStream: null, alive: true };
+    const opaqueId = "kraken-live-" + Janus.randomString(12);
+    const janusInstance = new Janus({
+      server: broadcaster.janus,
+      iceServers: ICE_SERVERS,
+      success: () => {
+        if (!sub.alive) return;
+        sub.janusInstance = janusInstance;
+        janusInstance.attach({
+          plugin: "janus.plugin.videoroom",
+          opaqueId,
+          success: (handle) => {
+            if (!sub.alive) return;
+            sub.handle = handle;
+            handle.send({
+              message: { request: "listparticipants", room: broadcaster.room },
+              // Erro do plugin (sala não existe mais etc) chega aqui
+              // dentro de success(data), não em error() - achado real
+              // testando direto contra o Janus de produção (v43).
+              success: (data) => {
+                if (!sub.alive) return;
+                if (data && data.error_code) {
+                  onFail(`${broadcaster.name} não está mais ao vivo (${data.error}).`);
+                  return;
+                }
+                const pub = (data.participants || []).find((p) => p.publisher);
+                if (!pub) {
+                  onFail(`${broadcaster.name} não está mais ao vivo.`);
+                  return;
+                }
+                handle.send({ message: { request: "join", room: broadcaster.room, ptype: "subscriber", streams: [{ feed: pub.id }] } });
+              },
+              error: (err) => onFail("Não consegui entrar na transmissão: " + err),
+            });
+          },
+          error: (err) => onFail("Não consegui conectar no servidor de transmissão: " + err),
+          onmessage: (msg, jsep) => {
+            if (!sub.alive || !sub.handle) return;
+            if (msg.videoroom === "event" && msg.error_code) {
+              onFail(msg.error || "Erro ao assistir a transmissão");
+              return;
+            }
+            if (jsep) {
+              sub.handle.createAnswer({
+                jsep,
+                tracks: [{ type: "data" }], // recvonly de áudio/vídeo (sem capturar nada nosso)
+                success: (answerJsep) => {
+                  if (!sub.alive || !sub.handle) return;
+                  sub.handle.send({ message: { request: "start", room: broadcaster.room }, jsep: answerJsep });
+                },
+                error: (err) => onFail("Erro ao assistir a transmissão: " + (err && err.message ? err.message : err)),
+              });
+            }
+          },
+          onremotetrack: (track, mid, on) => {
+            if (!sub.alive) return;
+            if (on) {
+              if (!sub.remoteStream) sub.remoteStream = new MediaStream();
+              sub.remoteStream.addTrack(track);
+              videoEl.srcObject = sub.remoteStream;
+              onStatus();
+            } else if (sub.remoteStream) {
+              sub.remoteStream.removeTrack(track);
+            }
+          },
+          oncleanup: () => {},
+        });
+      },
+      error: (err) => onFail("Não consegui conectar no servidor de transmissão: " + err),
+      destroyed: () => {},
+    });
+    sub.teardown = () => {
+      sub.alive = false;
+      try { if (sub.handle) sub.handle.detach(); } catch (e) {}
+      try { if (sub.janusInstance) sub.janusInstance.destroy(); } catch (e) {}
+      videoEl.srcObject = null;
+    };
+    return sub;
+  }
+
   async function watchLive(broadcaster) {
     if (!broadcaster) return;
     if (liveState) liveReset();
@@ -845,82 +941,35 @@
     }
     await ensureJanusInit();
 
-    liveState = { role: "viewer", room: broadcaster.room, janusInstance: null, handle: null, remoteStream: null };
+    liveState = { role: "viewer", room: broadcaster.room, sub: null };
     liveScreen.classList.remove("hidden");
     liveVideo.muted = false;
     liveStatusText.textContent = `Conectando com a transmissão de ${broadcaster.name}…`;
 
-    const opaqueId = "kraken-live-" + Janus.randomString(12);
-    const janusInstance = new Janus({
-      server: broadcaster.janus,
-      iceServers: ICE_SERVERS,
-      success: () => {
+    liveState.sub = janusSubscribe(
+      broadcaster,
+      liveVideo,
+      () => {
         if (!liveState) return;
-        liveState.janusInstance = janusInstance;
-        janusInstance.attach({
-          plugin: "janus.plugin.videoroom",
-          opaqueId,
-          success: (handle) => {
-            if (!liveState) return;
-            liveState.handle = handle;
-            handle.send({
-              message: { request: "listparticipants", room: broadcaster.room },
-              // Mesmo achado do "create" acima: erro do plugin (sala não
-              // existe mais, etc) chega aqui dentro de success(data), não
-              // em error().
-              success: (data) => {
-                if (!liveState) return;
-                if (data && data.error_code) {
-                  liveFail(`${broadcaster.name} não está mais ao vivo (${data.error}).`);
-                  return;
-                }
-                const pub = (data.participants || []).find((p) => p.publisher);
-                if (!pub) {
-                  liveFail(`${broadcaster.name} não está mais ao vivo.`);
-                  return;
-                }
-                handle.send({ message: { request: "join", room: broadcaster.room, ptype: "subscriber", streams: [{ feed: pub.id }] } });
-              },
-              error: (err) => liveFail("Não consegui entrar na transmissão: " + err),
-            });
-          },
-          error: (err) => liveFail("Não consegui conectar no servidor de transmissão: " + err),
-          onmessage: (msg, jsep) => {
-            if (!liveState || liveState.role !== "viewer" || !liveState.handle) return;
-            if (msg.videoroom === "event" && msg.error_code) {
-              liveFail(msg.error || "Erro ao assistir a transmissão");
-              return;
-            }
-            if (jsep) {
-              liveState.handle.createAnswer({
-                jsep,
-                tracks: [{ type: "data" }], // recvonly de áudio/vídeo (sem capturar nada nosso)
-                success: (answerJsep) => {
-                  if (!liveState || !liveState.handle) return;
-                  liveState.handle.send({ message: { request: "start", room: broadcaster.room }, jsep: answerJsep });
-                },
-                error: (err) => liveFail("Erro ao assistir a transmissão: " + (err && err.message ? err.message : err)),
-              });
-            }
-          },
-          onremotetrack: (track, mid, on) => {
-            if (!liveState) return;
-            if (on) {
-              if (!liveState.remoteStream) liveState.remoteStream = new MediaStream();
-              liveState.remoteStream.addTrack(track);
-              liveVideo.srcObject = liveState.remoteStream;
-              liveStatusText.textContent = `🔴 Assistindo ${broadcaster.name}`;
-              liveStopBtn.classList.remove("hidden");
-            } else if (liveState.remoteStream) {
-              liveState.remoteStream.removeTrack(track);
-            }
-          },
-          oncleanup: () => {},
-        });
+        liveStatusText.textContent = `🔴 Assistindo ${broadcaster.name}`;
+        liveStopBtn.classList.remove("hidden");
       },
-      error: (err) => liveFail("Não consegui conectar no servidor de transmissão: " + err),
-      destroyed: () => {},
-    });
+      (msg) => liveFail(msg)
+    );
+  }
+
+  // Extraído de openLivePicker (2026-09-07) pra reusar no seletor de cada
+  // quadrado do Mosaico, sem duplicar o fetch.
+  async function fetchLiveList() {
+    await ensureMyIdentity();
+    if (!myNodeId || !seedHttpUrl) return [];
+    try {
+      const res = await fetch(`${seedHttpUrl}/api/live/who_is_live?my_id=${encodeURIComponent(myNodeId)}`);
+      const data = await res.json();
+      return (data.live || []).map((p) => ({ ...p, janus: data.janus }));
+    } catch (e) {
+      return []; // sem conexão com o nó-semente agora
+    }
   }
 
   async function openLivePicker() {
@@ -933,26 +982,23 @@
       openModal("<h3>🔴 Live</h3><p class='muted'>Sem internet agora - Live precisa do nó-semente pra achar quem está transmitindo.</p>");
       return;
     }
-    let data = { live: [] };
-    try {
-      const res = await fetch(`${seedHttpUrl}/api/live/who_is_live?my_id=${encodeURIComponent(myNodeId)}`);
-      data = await res.json();
-    } catch (e) {
-      // sem conexão com o nó-semente agora - segue só com o botão de
-      // transmitir, sem lista de quem está ao vivo agora.
-    }
-    const liveList = (data.live || []).map((p) => ({ ...p, janus: data.janus }));
+    const liveList = await fetchLiveList();
     const rows = liveList.map((p, i) => `
       <button type="button" class="call-pick-btn" data-i="${i}">🔴 Assistir ${p.name}</button>
     `).join("");
     openModal(`
       <h3>🔴 Live</h3>
       <button type="button" id="live-start-btn" class="btn vermelho" style="width:100%;margin-bottom:10px">🔴 Transmitir agora</button>
+      <button type="button" id="live-mosaic-btn" class="btn roxo" style="width:100%;margin-bottom:10px">🔲 Mosaico (várias ao mesmo tempo)</button>
       ${rows ? `<div class="call-pick-list">${rows}</div>` : "<p class='muted'>Ninguém transmitindo agora.</p>"}
     `);
     document.getElementById("live-start-btn").addEventListener("click", () => {
       closeModal();
       startLiveBroadcast();
+    });
+    document.getElementById("live-mosaic-btn").addEventListener("click", () => {
+      closeModal();
+      openMosaic();
     });
     modalContent.querySelectorAll(".call-pick-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -962,6 +1008,147 @@
       });
     });
   }
+
+  // ---------- Mosaico de Lives (2026-09-07, pedido do Gilcimar) ----------
+  // Assistir de 1 a 9 transmissões ao mesmo tempo, tipo parede de câmeras
+  // de segurança - cada quadrado é uma assinatura Janus INDEPENDENTE
+  // (janusSubscribe, mesma função usada pelo watchLive de 1 tela só),
+  // escolhida livremente (dá pra repetir a mesma live em 2 quadrados, ou
+  // deixar quadrado vazio). Nada disso mexe no watchLive/liveState de
+  // tela cheia - são sistemas paralelos, só compartilham a função de
+  // assinatura.
+  let mosaicSize = 4;
+  let mosaicCells = []; // [{broadcaster, videoEl, labelEl, emptyEl, sub}]
+
+  function mosaicColumnsFor(n) {
+    return Math.ceil(Math.sqrt(n));
+  }
+
+  function mosaicTeardownCell(cell) {
+    if (cell.sub) {
+      cell.sub.teardown();
+      cell.sub = null;
+    }
+    cell.broadcaster = null;
+    if (cell.labelEl) cell.labelEl.textContent = "";
+    if (cell.emptyEl) {
+      cell.emptyEl.textContent = "toque pra escolher";
+      cell.emptyEl.classList.remove("hidden");
+    }
+  }
+
+  async function assignMosaicCell(cell) {
+    const liveList = await fetchLiveList();
+    const rows = liveList.map((p, i) => `
+      <button type="button" class="call-pick-btn" data-i="${i}">🔴 ${p.name}</button>
+    `).join("");
+    openModal(`
+      <h3>Escolher live pro quadrado</h3>
+      <button type="button" id="mosaic-cell-clear-btn" class="btn amarelo" style="width:100%;margin-bottom:10px">Deixar vazio</button>
+      ${rows ? `<div class="call-pick-list">${rows}</div>` : "<p class='muted'>Ninguém transmitindo agora.</p>"}
+    `);
+    document.getElementById("mosaic-cell-clear-btn").addEventListener("click", () => {
+      closeModal();
+      mosaicTeardownCell(cell);
+    });
+    modalContent.querySelectorAll(".call-pick-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const broadcaster = liveList[Number(btn.dataset.i)];
+        closeModal();
+        mosaicTeardownCell(cell); // troca limpo se já tinha algo nesse quadrado
+        if (!Janus || !Janus.isWebrtcSupported || !Janus.isWebrtcSupported()) {
+          alert("Esse navegador não suporta assistir transmissão ao vivo.");
+          return;
+        }
+        await ensureJanusInit();
+        cell.broadcaster = broadcaster;
+        cell.emptyEl.textContent = `conectando com ${broadcaster.name}…`;
+        cell.sub = janusSubscribe(
+          broadcaster,
+          cell.videoEl,
+          () => {
+            cell.emptyEl.classList.add("hidden");
+            cell.labelEl.textContent = "🔴 " + broadcaster.name;
+          },
+          (msg) => {
+            cell.emptyEl.textContent = msg;
+            cell.emptyEl.classList.remove("hidden");
+          }
+        );
+      });
+    });
+  }
+
+  function buildMosaicGrid() {
+    // Mantém as assinaturas dos quadrados que sobrevivem à mudança de
+    // tamanho (ex: ir de 6 pra 9 preserva os 6 já conectados) - só
+    // derruba quadrados que deixaram de existir (ex: ir de 9 pra 4).
+    mosaicCells.slice(mosaicSize).forEach(mosaicTeardownCell);
+    mosaicGrid.innerHTML = "";
+    const cols = mosaicColumnsFor(mosaicSize);
+    mosaicGrid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+    const novasCells = [];
+    for (let i = 0; i < mosaicSize; i++) {
+      const antiga = mosaicCells[i];
+      const cellDiv = document.createElement("div");
+      cellDiv.className = "mosaic-cell";
+      const video = document.createElement("video");
+      video.autoplay = true;
+      video.playsInline = true;
+      video.muted = false;
+      const label = document.createElement("div");
+      label.className = "mosaic-cell-label";
+      const empty = document.createElement("div");
+      empty.className = "mosaic-cell-empty";
+      empty.textContent = "toque pra escolher";
+      cellDiv.appendChild(video);
+      cellDiv.appendChild(label);
+      cellDiv.appendChild(empty);
+      mosaicGrid.appendChild(cellDiv);
+      const cell = { broadcaster: antiga ? antiga.broadcaster : null, videoEl: video, labelEl: label, emptyEl: empty, sub: antiga ? antiga.sub : null };
+      if (cell.sub && cell.broadcaster) {
+        // reconecta o <video> novo à mesma stream que já estava rolando
+        video.srcObject = cell.sub.remoteStream || null;
+        label.textContent = "🔴 " + cell.broadcaster.name;
+        empty.classList.add("hidden");
+      }
+      empty.addEventListener("click", () => assignMosaicCell(cell));
+      novasCells.push(cell);
+    }
+    mosaicCells = novasCells;
+  }
+
+  function closeMosaic() {
+    mosaicCells.forEach(mosaicTeardownCell);
+    mosaicCells = [];
+    mosaicGrid.innerHTML = "";
+    mosaicScreen.classList.add("hidden");
+  }
+
+  async function openMosaic() {
+    if (!Janus || !Janus.isWebrtcSupported || !Janus.isWebrtcSupported()) {
+      openModal("<h3>🔲 Mosaico</h3><p class='muted'>Esse navegador não suporta assistir transmissão ao vivo.</p>");
+      return;
+    }
+    await ensureJanusInit();
+    mosaicSizeLabel.textContent = String(mosaicSize);
+    mosaicScreen.classList.remove("hidden");
+    buildMosaicGrid();
+  }
+
+  mosaicSizeMinus.addEventListener("click", () => {
+    if (mosaicSize <= 1) return;
+    mosaicSize -= 1;
+    mosaicSizeLabel.textContent = String(mosaicSize);
+    buildMosaicGrid();
+  });
+  mosaicSizePlus.addEventListener("click", () => {
+    if (mosaicSize >= 9) return;
+    mosaicSize += 1;
+    mosaicSizeLabel.textContent = String(mosaicSize);
+    buildMosaicGrid();
+  });
+  mosaicCloseBtn.addEventListener("click", closeMosaic);
 
   liveStopBtn.addEventListener("click", liveReset);
 

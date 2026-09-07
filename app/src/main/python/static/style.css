@@ -525,6 +525,76 @@ body {
   text-shadow: 0 1px 4px rgba(0,0,0,.6);
 }
 
+/* ---------- Mosaico de Lives (2026-09-07) ---------- */
+.mosaic-screen {
+  position: fixed;
+  inset: 0;
+  background: #101014;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+}
+.mosaic-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: max(10px, env(safe-area-inset-top)) 10px 10px;
+  color: #fff;
+  font-weight: bold;
+  flex-wrap: wrap;
+}
+.mosaic-header > span:first-child { flex: 1; }
+.mosaic-size-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #fff;
+  font-size: 15px;
+}
+.mosaic-grid {
+  flex: 1;
+  display: grid;
+  gap: 3px;
+  padding: 3px;
+  min-height: 0;
+}
+.mosaic-cell {
+  position: relative;
+  background: #1c1c22;
+  border-radius: 6px;
+  overflow: hidden;
+  min-height: 0;
+}
+.mosaic-cell video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #1c1c22;
+}
+.mosaic-cell .mosaic-cell-label {
+  position: absolute;
+  bottom: 4px;
+  left: 6px;
+  right: 6px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: bold;
+  text-shadow: 0 1px 3px rgba(0,0,0,.8);
+  pointer-events: none;
+}
+.mosaic-cell .mosaic-cell-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255,255,255,.55);
+  font-size: 12px;
+  text-align: center;
+  padding: 8px;
+  cursor: pointer;
+}
+
 /* ---------- aviso "baixar o app" pra quem entra pelo navegador comum ---------- */
 .app-banner {
   position: fixed;
