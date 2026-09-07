@@ -1422,6 +1422,7 @@
     } else if (msg.kind === "audio") {
       const audio = document.createElement("audio");
       audio.controls = true;
+      audio.preload = "none"; // ver comentário grande na criação do <video>, mesmo motivo
       audio.src = "/files/" + msg.id + "/view";
       body.appendChild(audio);
       // Baixar o arquivo bruto - além de ser útil em geral (levar o áudio
@@ -1473,9 +1474,19 @@
       // nada mais enviava (socket/JS não sobrevive a essa ida-e-volta).
       // Vídeo agora toca embutido na conversa (mesmo <video> já usado na
       // Galeria) - nunca navega pra fora da página.
+      // ✅ CORRIGIDO (2026-09-07, mesma sessão): preload="none" - achado
+      // real testando com o Gilcimar. Por padrão o navegador busca
+      // metadado (e às vezes bytes) de TODO elemento <audio>/<video> assim
+      // que ele entra na tela, mesmo sem apertar play - com um histórico
+      // de dezenas de áudios (ver galeria de mensagens), abrir o chat
+      // disparava uma rajada de requisições simultâneas pro servidor local
+      // (SQLite + decifra em memória por arquivo) - contenção real que
+      // explicava "nada carrega" mesmo tocando manualmente. preload="none"
+      // só busca o arquivo quando a pessoa realmente aperta play.
       const video = document.createElement("video");
       video.className = "msg-image";
       video.controls = true;
+      video.preload = "none";
       video.src = "/files/" + msg.id + "/view";
       body.appendChild(video);
     } else if (msg.kind === "file") {
