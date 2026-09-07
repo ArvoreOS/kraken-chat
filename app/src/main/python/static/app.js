@@ -1177,6 +1177,30 @@
     if (el) setAckIcon(el, ack);
   }
 
+  // Reforço além do socket "file_ack" (2026-09-07, achado real testando com
+  // o Gilcimar): socketio.emit() sozinho é "empurrão único" - se a conexão
+  // Socket.IO não estiver viva bem naquele instante (mesmo padrão de bug já
+  // resolvido antes pra chamada de vídeo local, v37), o aviso passa batido
+  // pra sempre e o ícone fica preso em "salvando..." mesmo o nó-semente já
+  // tendo confirmado de verdade minutos antes. Consulta leve: só busca
+  // /api/messages quando existe pelo menos 1 mensagem minha ainda pendente,
+  // e só atualiza o ícone das que mudaram - nunca redesenha a tela toda.
+  async function syncPendingAcks() {
+    const pending = messagesCache.filter(
+      (m) => m.sender_id === senderId() && (m.kind === "audio" || m.kind === "file") && !m.seed_ack
+    );
+    if (pending.length === 0) return;
+    try {
+      const res = await fetch("/api/messages");
+      const msgs = await res.json();
+      for (const m of msgs) {
+        if (m.seed_ack) updateSeedAckStatus(m.id, 1);
+      }
+    } catch (e) {
+      // ignora falha de rede momentânea - tenta de novo no próximo ciclo
+    }
+  }
+
   function isImageName(name) {
     return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name || "");
   }
@@ -1420,6 +1444,7 @@
     connectSocket();
     pollPeers();
     setInterval(pollPeers, 5000);
+    setInterval(syncPendingAcks, 10000);
     startCallRelayLoop();
     renderTabs();
     // mesh.display_name (o nome anunciado pra quem te acha na rede local)
