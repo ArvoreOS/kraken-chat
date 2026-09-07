@@ -1157,6 +1157,26 @@
     if (matchesConv(msg)) paintMessage(msg);
   }
 
+  // Ícone "salvando.../salvo no nó-semente" em arquivo/áudio que EU mandei
+  // (2026-09-07, pedido do Gilcimar) - achado real: o metadado podia
+  // sincronizar (bolha aparece) sem os bytes nunca terem chegado no
+  // nó-semente (corrida no push), e isso era invisível até alguém tentar
+  // tocar/baixar dias depois. Mostra o estado de verdade sem bloquear o
+  // envio nem esconder a mensagem do remetente (Kraken continua
+  // funcionando 100% offline - o ícone só reflete o que já aconteceu).
+  function setAckIcon(el, ack) {
+    el.textContent = ack ? "☁️ salvo no nó-semente" : "☁️ salvando no nó-semente…";
+    el.classList.toggle("ack-done", !!ack);
+    el.classList.toggle("ack-pending", !ack);
+  }
+
+  function updateSeedAckStatus(id, ack) {
+    const cached = messagesCache.find((m) => m.id === id);
+    if (cached) cached.seed_ack = ack;
+    const el = messagesEl.querySelector(`[data-ack-for="${id}"]`);
+    if (el) setAckIcon(el, ack);
+  }
+
   function isImageName(name) {
     return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name || "");
   }
@@ -1373,6 +1393,13 @@
     } else {
       body.textContent = msg.text || "";
     }
+    if (mine && (msg.kind === "audio" || msg.kind === "file")) {
+      const ack = document.createElement("span");
+      ack.className = "seed-ack";
+      ack.dataset.ackFor = msg.id;
+      setAckIcon(ack, msg.seed_ack);
+      body.appendChild(ack);
+    }
     div.appendChild(body);
 
     const time = document.createElement("span");
@@ -1505,6 +1532,9 @@
     });
     socket.on("new_message", (msg) => {
       addMessage(msg);
+    });
+    socket.on("file_ack", (data) => {
+      updateSeedAckStatus(data.id, data.seed_ack);
     });
     socket.on("incoming_call", (data) => handleIncomingCall(data));
     socket.on("call_answered", (data) => handleCallAnswered(data));

@@ -312,7 +312,8 @@ class Store:
                 group_id TEXT,
                 recipient_id TEXT,
                 encrypted INTEGER DEFAULT 0,
-                origin_node_id TEXT
+                origin_node_id TEXT,
+                seed_ack INTEGER DEFAULT 0
             )
         """)
         # Migração pra bancos criados antes do motor de escopo existir.
@@ -323,6 +324,13 @@ class Store:
             ("recipient_id", "TEXT"),
             ("encrypted", "INTEGER DEFAULT 0"),
             ("origin_node_id", "TEXT"),
+            # seed_ack (2026-09-07): confirma que os BYTES do arquivo/áudio
+            # já foram entregues de verdade no nó-semente - achado real que
+            # o metadado podia sincronizar (mensagem aparece) sem o arquivo
+            # nunca ter chegado lá (corrida com o push, ver
+            # _push_file_to_seed). Sem essa coluna não tinha como o app
+            # avisar o usuário que um áudio/foto ainda não está "seguro".
+            ("seed_ack", "INTEGER DEFAULT 0"),
         ):
             if col not in existing_cols:
                 conn.execute(f"ALTER TABLE messages ADD COLUMN {col} {decl}")
@@ -393,6 +401,24 @@ class Store:
         conn = self._conn()
         conn.execute("UPDATE messages SET has_file=1 WHERE id=?", (msg_id,))
         conn.commit()
+
+    def mark_seed_ack(self, msg_id):
+        conn = self._conn()
+        conn.execute("UPDATE messages SET seed_ack=1 WHERE id=?", (msg_id,))
+        conn.commit()
+
+    def pending_seed_ack(self, origin_node_id, limit=50):
+        """Arquivos/áudios que EU mandei e que o nó-semente ainda não
+        confirmou ter recebido os bytes - usado pelo loop de reforço em
+        segundo plano (_seed_ack_retry_loop), pra não depender só da
+        primeira tentativa (ver _push_file_to_seed)."""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT id, file_name FROM messages WHERE origin_node_id=? AND has_file=1 "
+            "AND kind IN ('file','audio') AND seed_ack=0 ORDER BY ts DESC LIMIT ?",
+            (origin_node_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def all_ids(self):
         conn = self._conn()
@@ -1534,6 +1560,7 @@ def api_upload():
         "recipient_id": recipient_id,
         "encrypted": encrypted,
         "origin_node_id": NODE_ID,
+        "seed_ack": 0,  # ainda não empurrado pro nó-semente - ver _push_file_to_seed
     }
     store.add_message(msg, has_file=True)
     broadcast_new_message(msg)
@@ -1566,21 +1593,75 @@ def api_upload():
 # falhar (sem internet agora, nó-semente fora do ar), os mecanismos que
 # já existiam (retry por LAN, sync normal) continuam valendo do jeito que
 # já funcionavam antes, sem regressão nenhuma.
-def _push_file_to_seed(msg_id, data):
+# ✅ CORRIGIDO (2026-09-07) - corrida real achada investigando "áudio some
+# de novo": o empurrão acima e o aviso da mensagem (gossip) disparam quase
+# juntos (os dois logo depois do upload). A rota /api/push_file só aceita
+# os bytes se o nó-semente JÁ conhecer a mensagem (proteção contra arquivo
+# órfão) - só que o empurrão às vezes chegava ANTES do gossip terminar de
+# registrar a mensagem lá, tomando 404 ("mensagem ainda não sincronizou").
+# Sem repetição nenhuma, isso perdia os bytes pra sempre, mesmo a mensagem
+# "chegando" (metadado) segundos depois - confirmado direto no log de
+# produção (múltiplos POST /api/push_file/<id> → 404, e o arquivo real
+# nunca existiu em disco no nó-semente pra nenhum deles).
+#
+# urllib.request.urlopen levanta HTTPError (subclasse de OSError) pra
+# qualquer status != 2xx - o "except OSError" antigo engolia o 404 junto
+# com falha de rede de verdade, sem diferenciar "corrida, tenta de novo
+# rapidinho" de "sem internet agora, não adianta insistir na hora".
+def _push_file_to_seed(msg_id, data, attempts=5, delay=2):
     if not BOOTSTRAP_PEERS_RAW or not SEED_HTTP_URL:
-        return  # sem nó-semente configurado (ex: rodando no próprio nó-semente)
+        return False  # sem nó-semente configurado (ex: rodando no próprio nó-semente)
     import urllib.request
+    import urllib.error
     url = f"{SEED_HTTP_URL}/api/push_file/{msg_id}"
-    try:
-        req = urllib.request.Request(url, data=data, method="POST",
-                                      headers={"Content-Type": "application/octet-stream"})
-        urllib.request.urlopen(req, timeout=30)
-    except OSError:
-        pass  # melhor esforço - retry por LAN/sync normal continuam valendo
+    for attempt in range(attempts):
+        try:
+            req = urllib.request.Request(url, data=data, method="POST",
+                                          headers={"Content-Type": "application/octet-stream"})
+            urllib.request.urlopen(req, timeout=30)
+            store.mark_seed_ack(msg_id)
+            # avisa a própria WebView local (mesmo processo) que esse
+            # arquivo/áudio agora está seguro no nó-semente - pra trocar o
+            # ícone "salvando..." por "salvo" sem precisar recarregar nada.
+            socketio.emit("file_ack", {"id": msg_id, "seed_ack": 1})
+            return True
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and attempt < attempts - 1:
+                time.sleep(delay * (attempt + 1))  # corrida - dá tempo do gossip chegar
+                continue
+            return False  # 404 definitivo ou outro erro do próprio nó-semente
+        except OSError:
+            return False  # sem internet agora / nó-semente fora do ar - o loop de reforço tenta depois
+    return False
 
 
 def _push_file_to_seed_async(msg_id, data):
     threading.Thread(target=_push_file_to_seed, args=(msg_id, data), daemon=True).start()
+
+
+# Rede de segurança além da corrida acima: se o push falhar de vez (sem
+# internet no momento do envio, nó-semente fora do ar), nada tentava de
+# novo depois - pedido explícito do Gilcimar ("não se perde depois"), pra
+# cobrir exatamente o caso relatado (áudio ficou "normal" por um tempo,
+# some depois de dias sem abrir o app: os bytes nunca chegaram no
+# nó-semente, e ninguém tentava de novo). Varre periodicamente só os
+# arquivos/áudios que EU mandei e ainda não têm confirmação - nunca mexe
+# em mensagem de outro nó (essa é responsabilidade de quem originou).
+def _seed_ack_retry_loop():
+    while True:
+        time.sleep(120)
+        if not BOOTSTRAP_PEERS_RAW or not SEED_HTTP_URL:
+            continue  # sem nó-semente configurado (ex: o próprio nó-semente)
+        try:
+            for row in store.pending_seed_ack(NODE_ID):
+                local_path = FILES_DIR / f"{row['id']}_{row['file_name']}"
+                if local_path.exists():
+                    _push_file_to_seed(row["id"], local_path.read_bytes())
+        except Exception:
+            pass  # nunca deixar esse loop morrer por causa de 1 mensagem
+
+
+threading.Thread(target=_seed_ack_retry_loop, daemon=True).start()
 
 
 @app.route("/api/push_file/<msg_id>", methods=["POST"])

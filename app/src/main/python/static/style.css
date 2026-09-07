@@ -270,6 +270,17 @@ body {
   opacity: .7;
 }
 
+.msg .seed-ack {
+  display: block;
+  font-size: 10.5px;
+  margin-top: 3px;
+  opacity: 0.65;
+}
+
+.msg .seed-ack.ack-pending {
+  font-style: italic;
+}
+
 .composer {
   display: flex;
   align-items: center;
