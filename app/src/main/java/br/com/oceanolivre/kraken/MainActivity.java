@@ -7,14 +7,18 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.webkit.JsPromptResult;
+import android.webkit.JsResult;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.EditText;
 import android.widget.Toast;
 import android.app.Activity;
+import android.app.AlertDialog;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
@@ -160,6 +164,55 @@ public class MainActivity extends Activity {
                     ActivityCompat.requestPermissions(MainActivity.this,
                             androidPermsFaltando.toArray(new String[0]), WEB_PERMISSION_REQUEST);
                 });
+            }
+
+            // ✅ CORRIGIDO (2026-09-07): onJsAlert/onJsConfirm/onJsPrompt nunca
+            // tinham sido implementados aqui - a implementação PADRÃO do
+            // WebChromeClient (a classe-mãe, sem override nenhum) não mostra
+            // diálogo visual nenhum pra alert()/confirm()/prompt() do
+            // JavaScript, só resolve a chamada sem UI. Isso significa que
+            // TODO alert() já escrito no app.js (erro de envio, erro de
+            // upload etc) pode nunca ter aparecido de verdade na tela do
+            // Gilcimar - achado investigando "sem erro nenhum" em vários
+            // sintomas reportados na mesma sessão. Padrão oficial da
+            // documentação do Android pra WebView com JS habilitado.
+            @Override
+            public boolean onJsAlert(WebView view, String url, String message, JsResult result) {
+                new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(message)
+                        .setPositiveButton("OK", (dialog, which) -> result.confirm())
+                        .setOnCancelListener(dialog -> result.cancel())
+                        .setCancelable(true)
+                        .show();
+                return true;
+            }
+
+            @Override
+            public boolean onJsConfirm(WebView view, String url, String message, JsResult result) {
+                new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(message)
+                        .setPositiveButton("OK", (dialog, which) -> result.confirm())
+                        .setNegativeButton("Cancelar", (dialog, which) -> result.cancel())
+                        .setOnCancelListener(dialog -> result.cancel())
+                        .setCancelable(true)
+                        .show();
+                return true;
+            }
+
+            @Override
+            public boolean onJsPrompt(WebView view, String url, String message, String defaultValue,
+                                       JsPromptResult result) {
+                final EditText input = new EditText(MainActivity.this);
+                if (defaultValue != null) input.setText(defaultValue);
+                new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(message)
+                        .setView(input)
+                        .setPositiveButton("OK", (dialog, which) -> result.confirm(input.getText().toString()))
+                        .setNegativeButton("Cancelar", (dialog, which) -> result.cancel())
+                        .setOnCancelListener(dialog -> result.cancel())
+                        .setCancelable(true)
+                        .show();
+                return true;
             }
         });
         webView.setWebViewClient(new WebViewClient());

@@ -35,6 +35,10 @@
   // pro chat com o nome antigo, achando que sumiu sozinha. Achado real
   // reportado pelo Gilcimar.
   const STORAGE_LOGGED_IN = "kraken_logged_in";
+  // Token da carteira Exaguinon (Estágio 1, 2026-09-07) - gerado pelo
+  // nó-semente no login/cadastro, guardado aqui pra não precisar pedir
+  // e-mail/senha de novo toda vez que a pessoa quiser presentear.
+  const STORAGE_WALLET_TOKEN = "kraken_wallet_token";
 
   const nameScreen = document.getElementById("name-screen");
   const chatScreen = document.getElementById("chat-screen");
@@ -170,6 +174,7 @@
   const callHangupBtn = document.getElementById("call-hangup-btn");
   const callMuteBtn = document.getElementById("call-mute-btn");
   const btnCall = document.getElementById("btn-call");
+  const btnGift = document.getElementById("btn-gift");
   const btnBroadcast = document.getElementById("btn-broadcast");
   const btnGroupInvite = document.getElementById("btn-group-invite");
   const liveScreen = document.getElementById("live-screen");
@@ -962,6 +967,121 @@
 
   btnCall.addEventListener("click", openPeerPicker);
   btnBroadcast.addEventListener("click", openLivePicker);
+
+  // ---------- carteira Exaguinon (Estágio 1, 2026-09-07) ----------
+  // Pedido do Gilcimar: testar a lógica de presentear usando o Exaguinon
+  // ("on") como moeda interna, unificando Kraken e Oceano Livre - sem
+  // blockchain nenhuma ainda, só o livro-razão do nó-semente (ver
+  // server.py, seção "carteira Exaguinon"). Sempre precisa de internet
+  // (mesma limitação que login já tem - não dá pra inventar saldo
+  // offline), o resto do Kraken continua 100% offline-first normal.
+
+  // Quem já tinha feito login ANTES dessa versão existir não tem token
+  // guardado (login só acontece 1x na vida, por design) - pede e-mail/
+  // senha só nessa hora, sem reconstruir a tela de login inteira.
+  async function ensureWalletToken() {
+    let token = localStorage.getItem(STORAGE_WALLET_TOKEN);
+    if (token) return token;
+    await ensureMyIdentity();
+    const email = prompt("Pra usar a carteira Exaguinon, confirma seu e-mail de login:");
+    if (!email) return null;
+    const password = prompt("E sua senha:");
+    if (!password) return null;
+    try {
+      const res = await fetch(`${seedHttpUrl}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(data.error || "não deu certo entrar na carteira");
+        return null;
+      }
+      localStorage.setItem(STORAGE_WALLET_TOKEN, data.token);
+      return data.token;
+    } catch (e) {
+      alert("precisa de internet pra usar a carteira: " + (e && e.message ? e.message : e));
+      return null;
+    }
+  }
+
+  async function sendGift() {
+    const token = await ensureWalletToken();
+    if (!token) return;
+    const valorStr = prompt("Quanto de 'on' (Exaguinon de teste, não é dinheiro real) quer mandar?");
+    if (!valorStr) return;
+    const valor = parseFloat(valorStr.replace(",", "."));
+    if (!valor || valor <= 0) {
+      alert("valor inválido");
+      return;
+    }
+    const mensagem = prompt("Mensagem junto do presente (opcional):") || "";
+    try {
+      const res = await fetch(`${seedHttpUrl}/api/wallet/send_gift`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, valor, mensagem }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(data.error || "não deu pra mandar o presente");
+        return;
+      }
+      const body2 = {
+        gift_id: data.gift_id, valor: data.valor, mensagem: data.mensagem,
+        sender_id: senderId(), sender_name: myName(),
+      };
+      if (currentConv.type === "direct") {
+        body2.scope = "direct";
+        body2.recipient_id = currentConv.peer_id;
+      } else if (currentConv.type === "group") {
+        body2.scope = "group";
+        body2.group_id = currentConv.group_id;
+      } else {
+        body2.scope = "global";
+      }
+      const res2 = await fetch("/api/send_gift_message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body2),
+      });
+      const data2 = await res2.json();
+      if (data2.ok) addMessage(data2.message);
+      else alert(data2.error || "presente debitado mas a mensagem não apareceu - avisa quem programou");
+    } catch (e) {
+      alert("erro ao presentear: " + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function redeemGift(giftId, btnEl) {
+    const token = await ensureWalletToken();
+    if (!token) return;
+    btnEl.disabled = true;
+    btnEl.textContent = "resgatando…";
+    try {
+      const res = await fetch(`${seedHttpUrl}/api/wallet/redeem_gift`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, gift_id: giftId }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        btnEl.textContent = "✅ resgatado! +" + data.valor + " on";
+        alert("Você recebeu " + data.valor + " on (Exaguinon de teste)!");
+      } else {
+        btnEl.disabled = false;
+        btnEl.textContent = "🎁 resgatar";
+        alert(data.error || "não deu pra resgatar");
+      }
+    } catch (e) {
+      btnEl.disabled = false;
+      btnEl.textContent = "🎁 resgatar";
+      alert("erro ao resgatar: " + (e && e.message ? e.message : e));
+    }
+  }
+
+  btnGift.addEventListener("click", sendGift);
   callAcceptBtn.addEventListener("click", acceptCall);
   callRejectBtn.addEventListener("click", rejectCall);
   callHangupBtn.addEventListener("click", hangupCall);
@@ -1499,6 +1619,43 @@
         triggerBlobDownload("/files/" + msg.id + "/view", msg.file_name || "arquivo");
       });
       body.appendChild(a);
+    } else if (msg.kind === "gift") {
+      // Carteira Exaguinon, Estágio 1 (2026-09-07) - card de presente.
+      // O texto guarda um JSON {gift_id, valor, mensagem} - a mensagem em
+      // si só sincroniza pela malha normal (mesmo mecanismo de
+      // texto/áudio/arquivo), mas resgatar sempre fala direto com o
+      // nó-semente (única autoridade sobre saldo de verdade).
+      let gift = null;
+      try { gift = JSON.parse(msg.text); } catch (e) { /* mensagem antiga/quebrada */ }
+      const card = document.createElement("div");
+      card.className = "gift-card";
+      if (!gift) {
+        card.textContent = "🎁 presente (dados corrompidos)";
+      } else {
+        const titulo = document.createElement("div");
+        titulo.className = "gift-titulo";
+        titulo.textContent = "🎁 " + gift.valor + " on (Exaguinon de teste)";
+        card.appendChild(titulo);
+        if (gift.mensagem) {
+          const msgEl = document.createElement("div");
+          msgEl.className = "gift-mensagem";
+          msgEl.textContent = gift.mensagem;
+          card.appendChild(msgEl);
+        }
+        if (mine) {
+          const status = document.createElement("div");
+          status.className = "gift-status";
+          status.textContent = "enviado";
+          card.appendChild(status);
+        } else {
+          const btn = document.createElement("button");
+          btn.className = "btn roxo small gift-resgatar";
+          btn.textContent = "🎁 resgatar";
+          btn.addEventListener("click", () => redeemGift(gift.gift_id, btn));
+          card.appendChild(btn);
+        }
+      }
+      body.appendChild(card);
     } else {
       body.textContent = msg.text || "";
     }
@@ -1611,6 +1768,7 @@
       }
       localStorage.setItem(STORAGE_NAME, data.name);
       localStorage.setItem(STORAGE_LOGGED_IN, "1");
+      if (data.token) localStorage.setItem(STORAGE_WALLET_TOKEN, data.token);
       showChat();
     } catch (e) {
       loginError.textContent = "Precisa de internet pra entrar (ou criar conta) pela primeira vez.";

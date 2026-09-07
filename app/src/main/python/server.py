@@ -369,7 +369,39 @@ class Store:
                 email TEXT PRIMARY KEY,
                 password_hash TEXT,
                 name TEXT,
+                created_ts REAL,
+                saldo REAL DEFAULT 0
+            )
+        """)
+        existing_account_cols = {row[1] for row in conn.execute("PRAGMA table_info(accounts)")}
+        if "saldo" not in existing_account_cols:
+            conn.execute("ALTER TABLE accounts ADD COLUMN saldo REAL DEFAULT 0")
+        # Carteira Exaguinon (Estágio 1, 2026-09-07) - livro-razão simples de
+        # "on" só pra testar a LÓGICA de presentear entre Kraken e Oceano
+        # Livre, sem tocar em blockchain ainda (pedido do Gilcimar). Só faz
+        # sentido de verdade no nó-semente (mesma lógica de `accounts`
+        # acima) - um celular comum tem essas tabelas vazias/sem uso, igual
+        # já acontece com login.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                email TEXT,
                 created_ts REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS gifts (
+                id TEXT PRIMARY KEY,
+                sender_email TEXT,
+                sender_name TEXT,
+                valor REAL,
+                mensagem TEXT,
+                ts REAL,
+                msg_id TEXT,
+                resgatado INTEGER DEFAULT 0,
+                resgatado_por_email TEXT,
+                resgatado_por_name TEXT,
+                resgatado_ts REAL
             )
         """)
         conn.commit()
@@ -487,12 +519,12 @@ class Store:
         return [dict(r) for r in rows]
 
     # ---------- contas (login) ----------
-    def create_account(self, email, password_hash, name):
+    def create_account(self, email, password_hash, name, saldo_inicial=0):
         conn = self._conn()
         try:
             conn.execute(
-                "INSERT INTO accounts (email, password_hash, name, created_ts) VALUES (?,?,?,?)",
-                (email, password_hash, name, time.time()),
+                "INSERT INTO accounts (email, password_hash, name, created_ts, saldo) VALUES (?,?,?,?,?)",
+                (email, password_hash, name, time.time(), saldo_inicial),
             )
             conn.commit()
             return True
@@ -502,9 +534,78 @@ class Store:
     def get_account(self, email):
         conn = self._conn()
         row = conn.execute(
-            "SELECT email, password_hash, name FROM accounts WHERE email=?", (email,)
+            "SELECT email, password_hash, name, saldo FROM accounts WHERE email=?", (email,)
         ).fetchone()
         return dict(row) if row else None
+
+    # ---------- carteira Exaguinon (Estágio 1 - livro-razão, sem blockchain ainda) ----------
+    def create_session(self, email):
+        token = uuid.uuid4().hex
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO sessions (token, email, created_ts) VALUES (?,?,?)",
+            (token, email, time.time()),
+        )
+        conn.commit()
+        return token
+
+    def get_session_email(self, token):
+        if not token:
+            return None
+        conn = self._conn()
+        row = conn.execute("SELECT email FROM sessions WHERE token=?", (token,)).fetchone()
+        return row["email"] if row else None
+
+    def debitar(self, email, valor):
+        """Debita `valor` da conta - atômico dentro da própria transação
+        SQLite (lê e escreve na mesma conexão, sem ponto de troca de
+        contexto no meio). Retorna False sem alterar nada se saldo
+        insuficiente - nunca deixa saldo negativo."""
+        conn = self._conn()
+        row = conn.execute("SELECT saldo FROM accounts WHERE email=?", (email,)).fetchone()
+        if not row or row["saldo"] < valor:
+            return False
+        conn.execute("UPDATE accounts SET saldo = saldo - ? WHERE email=?", (valor, email))
+        conn.commit()
+        return True
+
+    def creditar(self, email, valor):
+        conn = self._conn()
+        conn.execute("UPDATE accounts SET saldo = saldo + ? WHERE email=?", (valor, email))
+        conn.commit()
+
+    def create_gift(self, gift_id, sender_email, sender_name, valor, mensagem, msg_id):
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO gifts (id, sender_email, sender_name, valor, mensagem, ts, msg_id, resgatado) "
+            "VALUES (?,?,?,?,?,?,?,0)",
+            (gift_id, sender_email, sender_name, valor, mensagem, time.time(), msg_id),
+        )
+        conn.commit()
+
+    def get_gift(self, gift_id):
+        conn = self._conn()
+        row = conn.execute("SELECT * FROM gifts WHERE id=?", (gift_id,)).fetchone()
+        return dict(row) if row else None
+
+    def redeem_gift(self, gift_id, email, name):
+        """Resgata um presente - marca como resgatado e credita o valor.
+        Idempotente/seguro contra corrida: o UPDATE só afeta linha se
+        `resgatado=0` ainda, então duas tentativas simultâneas (ex: dois
+        cliques rápidos, ou dois dispositivos tentando resgatar o mesmo
+        presente de grupo ao mesmo tempo) nunca creditam duas vezes -
+        `rowcount` conta quantas linhas o UPDATE realmente mudou."""
+        conn = self._conn()
+        cur = conn.execute(
+            "UPDATE gifts SET resgatado=1, resgatado_por_email=?, resgatado_por_name=?, resgatado_ts=? "
+            "WHERE id=? AND resgatado=0",
+            (email, name, time.time(), gift_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return False  # já tinha sido resgatado (ou não existe)
+        self.creditar(email, self.get_gift(gift_id)["valor"])
+        return True
 
     # ---------- grupos ----------
     def create_group(self, group_id, name, kind, key):
@@ -1024,10 +1125,15 @@ def api_auth_register():
         return _cors(jsonify({"ok": False, "error": "senha precisa de pelo menos 6 caracteres"})), 400
     if not name:
         return _cors(jsonify({"ok": False, "error": "nome obrigatório"})), 400
-    ok = store.create_account(email, generate_password_hash(password), name)
+    # Saldo de teste (Estágio 1 da carteira Exaguinon, 2026-09-07) - conta
+    # nova já nasce com 1000 "on" DE TESTE (deixado bem claro na UI que não
+    # é dinheiro real) pra dar pra testar a mecânica de presentear sem
+    # precisar minerar nada ainda - ver [[project_exaguinon]].
+    ok = store.create_account(email, generate_password_hash(password), name, saldo_inicial=1000)
     if not ok:
         return _cors(jsonify({"ok": False, "error": "esse e-mail já tem conta"})), 409
-    return _cors(jsonify({"ok": True, "name": name}))
+    token = store.create_session(email)
+    return _cors(jsonify({"ok": True, "name": name, "token": token, "saldo": 1000}))
 
 
 @app.route("/api/auth/login", methods=["POST", "OPTIONS"])
@@ -1040,7 +1146,146 @@ def api_auth_login():
     account = store.get_account(email)
     if not account or not check_password_hash(account["password_hash"], password):
         return _cors(jsonify({"ok": False, "error": "e-mail ou senha incorretos"})), 401
-    return _cors(jsonify({"ok": True, "name": account["name"]}))
+    token = store.create_session(email)
+    return _cors(jsonify({"ok": True, "name": account["name"], "token": token, "saldo": account["saldo"]}))
+
+
+# ---------- carteira Exaguinon (Estágio 1, 2026-09-07) ----------
+# Pedido do Gilcimar: unificar Oceano Livre + Kraken usando o Exaguinon
+# ("on") como moeda interna compartilhada - "presentear" alguém no Kraken.
+# Estágio 1 (ESTE código): testar só a LÓGICA - livro-razão simples aqui
+# no nó-semente (mesma tabela accounts do login, é a única "autoridade
+# sempre online" - um celular comum tem essa tabela vazia/sem uso, igual
+# já acontece com login e chamada relay). NENHUMA blockchain envolvida
+# ainda - saldo é só um número no SQLite, deixado bem claro na UI que é
+# "on de teste". Estágio 2 (futuro, não implementado) trocaria isso por
+# uma carteira custodiada de verdade no contrato OnGuinExa (testnet Amoy),
+# sem precisar mudar a mecânica de presente/resgate em si.
+#
+# Presente = valor debitado na hora do envio (nunca fica "no ar" sem
+# dono), preso a um id de presente + uma mensagem de chat normal
+# (kind="gift") que carrega só o id/valor/mensagem - a mesma mensagem
+# sincroniza pela malha que já existe (texto/áudio/arquivo), mas resgatar
+# sempre fala direto com o nó-semente (precisa de internet, mesma
+# limitação que login já tem - não dá pra inventar dinheiro offline).
+@app.route("/api/wallet/balance", methods=["POST", "OPTIONS"])
+def api_wallet_balance():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    email = store.get_session_email(data.get("token"))
+    if not email:
+        return _cors(jsonify({"ok": False, "error": "sessão expirada - faça login de novo"})), 401
+    account = store.get_account(email)
+    return _cors(jsonify({"ok": True, "saldo": account["saldo"] if account else 0}))
+
+
+@app.route("/api/wallet/send_gift", methods=["POST", "OPTIONS"])
+def api_wallet_send_gift():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    email = store.get_session_email(data.get("token"))
+    if not email:
+        return _cors(jsonify({"ok": False, "error": "sessão expirada - faça login de novo"})), 401
+    try:
+        valor = float(data.get("valor"))
+    except (TypeError, ValueError):
+        return _cors(jsonify({"ok": False, "error": "valor inválido"})), 400
+    if valor <= 0:
+        return _cors(jsonify({"ok": False, "error": "valor precisa ser maior que zero"})), 400
+    account = store.get_account(email)
+    sender_name = account["name"] if account else "Alguém"
+    mensagem = (data.get("mensagem") or "").strip()[:280]
+    if not store.debitar(email, valor):
+        return _cors(jsonify({"ok": False, "error": "saldo insuficiente"})), 400
+    gift_id = uuid.uuid4().hex
+    store.create_gift(gift_id, email, sender_name, valor, mensagem, msg_id=None)
+    return _cors(jsonify({"ok": True, "gift_id": gift_id, "valor": valor, "mensagem": mensagem,
+                           "sender_name": sender_name}))
+
+
+@app.route("/api/wallet/redeem_gift", methods=["POST", "OPTIONS"])
+def api_wallet_redeem_gift():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    email = store.get_session_email(data.get("token"))
+    if not email:
+        return _cors(jsonify({"ok": False, "error": "sessão expirada - faça login de novo"})), 401
+    gift_id = data.get("gift_id")
+    gift = store.get_gift(gift_id)
+    if not gift:
+        return _cors(jsonify({"ok": False, "error": "presente não encontrado"})), 404
+    if gift["sender_email"] == email:
+        return _cors(jsonify({"ok": False, "error": "não dá pra resgatar seu próprio presente"})), 400
+    account = store.get_account(email)
+    name = account["name"] if account else "Alguém"
+    if not store.redeem_gift(gift_id, email, name):
+        return _cors(jsonify({"ok": False, "error": "esse presente já foi resgatado"})), 409
+    return _cors(jsonify({"ok": True, "valor": gift["valor"]}))
+
+
+@app.route("/api/wallet/gift/<gift_id>")
+def api_wallet_gift_info(gift_id):
+    # Sem exigir login - qualquer um que vê a mensagem no chat pode
+    # conferir o status (valor, se já foi resgatado) antes de decidir
+    # entrar/logar pra resgatar.
+    gift = store.get_gift(gift_id)
+    if not gift:
+        return _cors(jsonify({"ok": False, "error": "presente não encontrado"})), 404
+    return _cors(jsonify({
+        "ok": True,
+        "valor": gift["valor"],
+        "mensagem": gift["mensagem"],
+        "sender_name": gift["sender_name"],
+        "resgatado": bool(gift["resgatado"]),
+        "resgatado_por_name": gift["resgatado_por_name"],
+    }))
+
+
+# Rota LOCAL (roda em qualquer nó, não só no nó-semente) - cria a
+# mensagem de chat "🎁 presente" depois que o /api/wallet/send_gift já
+# confirmou o débito de verdade no nó-semente. Separada em 2 chamadas
+# (debitar lá, depois criar mensagem aqui) porque o débito é a parte que
+# PRECISA de autoridade central - a mensagem em si já usa a mesma
+# sincronização/criptografia por escopo que texto/áudio/arquivo sempre
+# usaram, sem inventar mecanismo novo.
+@app.route("/api/send_gift_message", methods=["POST"])
+def api_send_gift_message():
+    data = request.get_json(force=True) or {}
+    gift_id = data.get("gift_id")
+    valor = data.get("valor")
+    mensagem = data.get("mensagem") or ""
+    sender_name = data.get("sender_name") or "Alguém"
+    sender_id = data.get("sender_id") or NODE_ID
+    scope = data.get("scope") if data.get("scope") in ("global", "direct", "group") else "global"
+    group_id = data.get("group_id")
+    recipient_id = data.get("recipient_id")
+    if not gift_id or valor is None:
+        return jsonify({"ok": False, "error": "presente inválido"}), 400
+
+    payload = json.dumps({"gift_id": gift_id, "valor": valor, "mensagem": mensagem})
+    try:
+        ciphertext, encrypted = _encrypt_for_scope(
+            payload.encode(), scope, group_id=group_id, recipient_id=recipient_id
+        )
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    stored_text = base64.b64encode(ciphertext).decode() if encrypted else ciphertext.decode()
+
+    msg_id = uuid.uuid4().hex
+    msg = {
+        "id": msg_id, "sender_id": sender_id, "sender_name": sender_name, "ts": time.time(),
+        "kind": "gift", "text": stored_text,
+        "scope": scope, "group_id": group_id, "recipient_id": recipient_id, "encrypted": encrypted,
+        "origin_node_id": NODE_ID,
+    }
+    store.add_message(msg, has_file=True)
+    plain = dict(msg, text=payload, encrypted=False, hidden=False)
+    broadcast_new_message(plain)
+    mesh.sync_now()
+    return jsonify({"ok": True, "message": plain})
 
 
 # ---------- chamada de vídeo P2P (WebRTC) ----------
