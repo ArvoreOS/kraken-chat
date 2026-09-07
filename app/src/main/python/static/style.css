@@ -378,7 +378,16 @@ body {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  z-index: 50;
+  /* ✅ CORRIGIDO (2026-09-07): era z-index 50, empatado com
+     .call-screen/.live-screen/.mosaic-screen (todas 50) - empate de
+     z-index resolve pela ordem no DOM, e como as telas cheias vêm DEPOIS
+     do modal no HTML, elas pintavam por cima dele. Achado real: abrir o
+     seletor de live dentro de um quadrado do Mosaico (openModal chamado
+     com #mosaic-screen ainda visível, caso novo que nenhuma tela cheia
+     anterior tinha) - o modal abria de verdade (o clique funcionava), só
+     ficava invisível atrás do fundo opaco do mosaico. Modal precisa
+     SEMPRE ficar acima de qualquer tela cheia. */
+  z-index: 55;
 }
 .modal {
   background: #fff;
