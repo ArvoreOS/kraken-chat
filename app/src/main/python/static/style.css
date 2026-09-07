@@ -563,9 +563,21 @@ body {
 .mosaic-grid {
   flex: 1;
   display: grid;
-  gap: 3px;
-  padding: 3px;
+  gap: 6px;
+  padding: 10px;
   min-height: 0;
+  /* ✅ CORRIGIDO (2026-09-07): com poucos quadrados, o grid antes
+     esticava cada um pra ocupar TODA a altura disponível (comportamento
+     padrão do CSS Grid) - achado real testando com o Gilcimar (2 ou 4
+     lives ficavam "esticadas", faixas finas e altas). align/justify-
+     content:center faz as linhas/colunas pararem de esticar sozinhas -
+     combinado com aspect-ratio no quadrado (abaixo), cada um fica no
+     tamanho certo e sobra espaço, preenchido pela arte do Kraken.*/
+  align-content: center;
+  justify-content: center;
+  background:
+    linear-gradient(rgba(16,16,20,.82), rgba(16,16,20,.82)),
+    url("/static/icons/kraken-hero.jpg") center/cover;
 }
 .mosaic-cell {
   position: relative;
@@ -573,6 +585,8 @@ body {
   border-radius: 6px;
   overflow: hidden;
   min-height: 0;
+  width: 100%;
+  aspect-ratio: 4 / 3; /* "retângulo quase quadrado", pedido do Gilcimar */
 }
 .mosaic-cell video {
   width: 100%;

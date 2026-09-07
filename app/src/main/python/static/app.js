@@ -1020,8 +1020,15 @@
   let mosaicSize = 4;
   let mosaicCells = []; // [{broadcaster, videoEl, labelEl, emptyEl, sub}]
 
+  // ✅ CORRIGIDO (2026-09-07): era Math.ceil(Math.sqrt(n)) - bom pra tela
+  // larga, mas o celular é retrato (mais alto que largo). Pra n=2, isso
+  // dava 2 colunas lado a lado = 2 faixas bem estreitas e altíssimas
+  // ("esticada", achado real testando com o Gilcimar). Tabela pensada
+  // pra retrato: menos colunas quando dá, deixando cada quadrado mais
+  // perto de um retângulo normal em vez de uma faixa fina.
+  const MOSAIC_COLS = { 1: 1, 2: 1, 3: 2, 4: 2, 5: 2, 6: 2, 7: 3, 8: 3, 9: 3 };
   function mosaicColumnsFor(n) {
-    return Math.ceil(Math.sqrt(n));
+    return MOSAIC_COLS[n] || Math.ceil(Math.sqrt(n));
   }
 
   function mosaicTeardownCell(cell) {
