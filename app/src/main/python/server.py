@@ -2025,6 +2025,35 @@ def debug_page():
     storage do app — sem precisar exportar/baixar arquivo nenhum.</p>
     <p><a class="btn" href="/debug/audio">🔍 Ver áudios gravados</a></p>
 
+    <h2>Erros do próprio app (JavaScript)</h2>
+    <p class="dim">Capturados automaticamente (erro não tratado ou promessa rejeitada sem
+    ninguém pegar) — ficam guardados neste aparelho até serem limpos. Não precisa de
+    console remoto, só abrir esta página.</p>
+    <div id="js-errors"></div>
+    <button onclick="window.__krakenClearJsErrors()" style="margin-top:8px;padding:6px 12px">
+      Limpar lista</button>
+    <script>
+      (function() {{
+        function render() {{
+          var el = document.getElementById('js-errors');
+          var raw = localStorage.getItem('kraken_js_errors');
+          var arr = raw ? JSON.parse(raw) : [];
+          if (!arr.length) {{ el.innerHTML = '<p class="dim">Nenhum erro registrado.</p>'; return; }}
+          var rows = arr.slice().reverse().map(function(e) {{
+            return '<tr><td class="mono">' + e.t + '</td><td>' + e.tipo + '</td>' +
+              '<td>' + (e.msg || '').replace(/</g,'&lt;') + '</td>' +
+              '<td class="mono">' + (e.origem || '') + '</td></tr>';
+          }}).join('');
+          el.innerHTML = '<table><tr><th>Quando</th><th>Tipo</th><th>Mensagem</th><th>Origem</th></tr>' + rows + '</table>';
+        }}
+        window.__krakenClearJsErrors = function() {{
+          localStorage.removeItem('kraken_js_errors');
+          render();
+        }};
+        render();
+      }})();
+    </script>
+
     <p><a class="btn" href="/">← Voltar pro chat</a></p>
     </body></html>"""
 

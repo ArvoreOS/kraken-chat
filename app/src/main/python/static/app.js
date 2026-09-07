@@ -1,4 +1,30 @@
 (function () {
+  // Captura de erro do próprio motor (2026-09-07, pedido do Gilcimar: "não
+  // tem como criar debug pra mostrar o que está com erro?"). Guarda em
+  // localStorage (sobrevive a reload/crash) pra aparecer na página 🩺
+  // /debug, sem precisar de console remoto nenhum - só abrir a página no
+  // próprio celular. Registrado o mais cedo possível no arquivo, antes de
+  // qualquer outro código que possa falhar.
+  const JS_ERROR_KEY = "kraken_js_errors";
+  function logClientError(entry) {
+    try {
+      const arr = JSON.parse(localStorage.getItem(JS_ERROR_KEY) || "[]");
+      arr.push({ t: new Date().toISOString(), ...entry });
+      while (arr.length > 30) arr.shift();
+      localStorage.setItem(JS_ERROR_KEY, JSON.stringify(arr));
+    } catch (e) {
+      // localStorage indisponível - não tem onde guardar, ignora
+    }
+  }
+  window.addEventListener("error", (e) => {
+    logClientError({ tipo: "error", msg: e.message, origem: (e.filename || "") + ":" + e.lineno });
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const reason = e.reason;
+    const msg = reason && reason.message ? reason.message : String(reason);
+    logClientError({ tipo: "promise rejeitada sem tratamento", msg });
+  });
+
   const STORAGE_NAME = "kraken_name";
   const STORAGE_ID = "kraken_sender_id";
   // Marca separada de "fez login de verdade" - versões antigas (antes do
@@ -1201,6 +1227,28 @@
     }
   }
 
+  // Baixa o arquivo via Blob em vez de navegar a página pra URL dele - o
+  // WebView não tem DownloadListener registrado (`MainActivity.java`),
+  // então um <a href download> comum navega a tela do Kraken pra fora da
+  // conversa (achado real 2026-09-07, ver comentários em paintMessage).
+  async function triggerBlobDownload(url, filename) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = filename || "arquivo";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    } catch (e) {
+      alert("erro ao baixar: " + (e && e.message ? e.message : e));
+    }
+  }
+
   function isImageName(name) {
     return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name || "");
   }
@@ -1376,43 +1424,69 @@
       audio.controls = true;
       audio.src = "/files/" + msg.id + "/view";
       body.appendChild(audio);
-      // Link de baixar o arquivo bruto - além de ser útil em geral (levar
-      // o áudio pra outro app), foi o jeito real de conseguir inspecionar
-      // um áudio que gravava mas não tocava (investigação 2026-08-29): o
-      // gravador nativo às vezes não deixa cópia achável em Música/
-      // Gravações, então o arquivo que o Kraken já tem é o único jeito
-      // confiável de pegar os bytes reais.
+      // Baixar o arquivo bruto - além de ser útil em geral (levar o áudio
+      // pra outro app), foi o jeito real de conseguir inspecionar um áudio
+      // que gravava mas não tocava (investigação 2026-08-29). ✅ CORRIGIDO
+      // (2026-09-07): era um <a href download> puro - o WebView do Android
+      // não tem DownloadListener nenhum registrado (`MainActivity.java`),
+      // então esse link NAVEGAVA a própria tela do Kraken pra fora da
+      // conversa em vez de baixar (o atributo `download` é ignorado sem
+      // esse listener). Mesmo bug que quebrava vídeo/imagem, achado
+      // testando com o Gilcimar (clicar num vídeo enviado e apertar
+      // voltar deixava a página num estado que não mandava mais nada -
+      // a navegação embaralhava o socket/estado da SPA). Trocado por
+      // download via Blob (busca os bytes com fetch, nunca navega a
+      // página de verdade).
       const dl = document.createElement("a");
-      dl.href = "/files/" + msg.id;
-      dl.download = msg.file_name || "audio";
+      dl.href = "#";
       dl.className = "audio-download-link";
       dl.textContent = "⬇ baixar áudio";
+      dl.addEventListener("click", (e) => {
+        e.preventDefault();
+        triggerBlobDownload("/files/" + msg.id, msg.file_name || "audio");
+      });
       body.appendChild(dl);
     } else if (msg.kind === "file" && isImageName(msg.file_name)) {
-      const a = document.createElement("a");
-      a.href = "/files/" + msg.id + "/view";
-      a.target = "_blank";
-      a.className = "file-link";
       const img = document.createElement("img");
       img.className = "msg-image";
       img.src = "/files/" + msg.id + "/view";
       img.alt = msg.file_name || "imagem";
       img.loading = "lazy";
+      img.style.cursor = "pointer";
+      img.addEventListener("click", () => openMediaViewer(msg, false));
       img.onerror = () => {
         // Arquivo ainda não chegou nesse nó (ex: peer de origem só
         // alcançável na rede local dele, não pela internet) - cai pra
-        // link em vez de deixar o ícone de imagem quebrada.
-        img.remove();
-        a.textContent = "📎 " + (msg.file_name || "imagem") + " (ainda não disponível aqui)";
+        // texto em vez de deixar o ícone de imagem quebrada.
+        const fallback = document.createElement("span");
+        fallback.className = "file-link";
+        fallback.textContent = "📎 " + (msg.file_name || "imagem") + " (ainda não disponível aqui)";
+        img.replaceWith(fallback);
       };
-      a.appendChild(img);
-      body.appendChild(a);
+      body.appendChild(img);
+    } else if (msg.kind === "file" && isVideoName(msg.file_name)) {
+      // Antes era um <a target="_blank"> pro arquivo bruto - achado real
+      // (2026-09-07, testando com o Gilcimar): sem suporte a nova janela
+      // no WebView (`MainActivity.java` não implementa onCreateWindow), o
+      // clique navegava a PRÓPRIA tela do Kraken pra fora da conversa;
+      // voltar com o gesto do Android deixava a página num estado onde
+      // nada mais enviava (socket/JS não sobrevive a essa ida-e-volta).
+      // Vídeo agora toca embutido na conversa (mesmo <video> já usado na
+      // Galeria) - nunca navega pra fora da página.
+      const video = document.createElement("video");
+      video.className = "msg-image";
+      video.controls = true;
+      video.src = "/files/" + msg.id + "/view";
+      body.appendChild(video);
     } else if (msg.kind === "file") {
       const a = document.createElement("a");
-      a.href = "/files/" + msg.id + "/view";
+      a.href = "#";
       a.className = "file-link";
-      a.target = "_blank";
       a.textContent = "📎 " + (msg.file_name || "arquivo");
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        triggerBlobDownload("/files/" + msg.id + "/view", msg.file_name || "arquivo");
+      });
       body.appendChild(a);
     } else {
       body.textContent = msg.text || "";
@@ -1588,7 +1662,6 @@
     e.preventDefault();
     const text = textInput.value.trim();
     if (!text) return;
-    textInput.value = "";
     let url = "/api/send";
     const body = { text, sender_id: senderId(), sender_name: myName() };
     if (currentConv.type === "direct") {
@@ -1598,14 +1671,30 @@
       url = "/api/send_group";
       body.group_id = currentConv.group_id;
     }
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (data.ok) addMessage(data.message);
-    else alert(data.error || "erro ao enviar mensagem");
+    // ✅ CORRIGIDO (2026-09-07): faltava try/catch aqui - mesma lição já
+    // aplicada em uploadBlob() no v30, nunca trazida pro envio de texto.
+    // Se o fetch falhasse (servidor local sem responder, rede caindo no
+    // meio), a promise rejeitava sem ninguém pegar - zero alerta, mensagem
+    // perdida em silêncio, e o campo já tinha sido limpo (parecia enviado).
+    // Achado real testando com o Gilcimar: texto simples "não veio" sem
+    // erro nenhum na tela.
+    textInput.value = "";
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (data.ok) addMessage(data.message);
+      else {
+        alert(data.error || "erro ao enviar mensagem");
+        textInput.value = text; // devolve o texto - não deixa perder o que a pessoa digitou
+      }
+    } catch (err) {
+      alert("erro ao enviar: " + (err && err.message ? err.message : err));
+      textInput.value = text;
+    }
   });
 
   async function uploadBlob(blob, kind, filename) {
