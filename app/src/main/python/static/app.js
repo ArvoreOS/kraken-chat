@@ -10,6 +10,15 @@
   function krakenKeyHeaders() {
     return KRAKEN_KEY ? { "X-Kraken-Key": KRAKEN_KEY } : {};
   }
+  // /debug é aberto navegando direto (sem cabeçalho custom possível) -
+  // leva a chave por query string quando existir (checklist de
+  // segurança 2026-09-07 item 4).
+  if (KRAKEN_KEY) {
+    document.addEventListener("DOMContentLoaded", () => {
+      const link = document.getElementById("btn-debug-link");
+      if (link) link.href = "/debug?key=" + encodeURIComponent(KRAKEN_KEY);
+    });
+  }
 
   // Captura de erro do próprio motor (2026-09-07, pedido do Gilcimar: "não
   // tem como criar debug pra mostrar o que está com erro?"). Guarda em

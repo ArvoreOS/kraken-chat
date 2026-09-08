@@ -115,6 +115,13 @@ JANUS_HTTP_URL = os.environ.get("KRAKEN_JANUS_HTTP_URL", "http://136.248.100.20:
 # verdade chegar nesse endereço - um celular comum nunca vai conseguir
 # (é sempre localhost, "ele mesmo").
 OCEANO_LIVRE_URL = os.environ.get("KRAKEN_OCEANO_LIVRE_URL", "http://localhost:5301")
+# Checklist de segurança 2026-09-07 (item 5) - o Oceano Livre passou a
+# exigir essa chave (OCEANO_API_KEY, mesmo valor) nas rotas que mexem em
+# saldo de verdade. Vazia por padrão (ambiente local/dev sem a env var
+# continua chamando sem header, igual sempre foi) - só importa de
+# verdade quando as duas env vars (aqui e lá) estão definidas com o
+# mesmo valor, no nó-semente de produção.
+OCEANO_API_KEY = os.environ.get("KRAKEN_OCEANO_API_KEY", "")
 
 # ✅ RESTAURADO (2026-09-07) - achado real fazendo uma avaliação de
 # segurança pedida pelo Gilcimar: essa proteção tinha sido criada em
@@ -143,10 +150,15 @@ def _checar_api_key():
     """Chamado no início de toda rota de escrita alcançável de fora
     (mensagem/arquivo/presente). Sem custo nenhum quando KRAKEN_API_KEY
     está vazia (Android/PC locais) - só vira checagem de verdade no
-    nó-semente, onde a env var é definida."""
+    nó-semente, onde a env var é definida. Aceita a chave tanto no
+    cabeçalho (X-Kraken-Key, usado pelo app.js) quanto por query string
+    (?key=..., checklist de segurança 2026-09-07 item 4: /debug é uma
+    página que a pessoa abre navegando direto no navegador - não dá pra
+    mandar cabeçalho customizado numa navegação simples)."""
     if not KRAKEN_API_KEY:
         return None
-    if request.headers.get("X-Kraken-Key") != KRAKEN_API_KEY:
+    chave = request.headers.get("X-Kraken-Key") or request.args.get("key")
+    if chave != KRAKEN_API_KEY:
         return jsonify({"ok": False, "error": "chave de API ausente ou incorreta"}), 401
     return None
 
@@ -436,6 +448,16 @@ class Store:
                 created_ts REAL
             )
         """)
+        # Checklist de segurança 2026-09-07 (item 2) - tentativas de login
+        # falhas, pra travar por um tempo depois de várias erradas seguidas.
+        # Só existe linha aqui quando a senha estava ERRADA - login certo
+        # nunca grava nada nessa tabela.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS login_falhas (
+                email TEXT,
+                ts REAL
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS gifts (
                 id TEXT PRIMARY KEY,
@@ -586,6 +608,28 @@ class Store:
         return dict(row) if row else None
 
     # ---------- carteira Exaguinon (Estágio 1 - livro-razão, sem blockchain ainda) ----------
+    # ---------- checklist de segurança 2026-09-07 (item 2) - rate limit de login ----------
+    MAX_TENTATIVAS_LOGIN = 5
+    JANELA_BLOQUEIO_LOGIN = 15 * 60  # 15 minutos
+
+    def registrar_falha_login(self, email):
+        conn = self._conn()
+        conn.execute("INSERT INTO login_falhas (email, ts) VALUES (?,?)", (email, time.time()))
+        conn.commit()
+
+    def bloqueado_por_tentativas(self, email):
+        """True se essa conta tomou MAX_TENTATIVAS_LOGIN ou mais senhas
+        erradas nos últimos JANELA_BLOQUEIO_LOGIN segundos. Não bloqueia
+        pra sempre - a própria passagem do tempo destrava sozinha (uma
+        tentativa de 16 min atrás já não conta mais), sem precisar de
+        "desbloquear" manual."""
+        conn = self._conn()
+        limite = time.time() - self.JANELA_BLOQUEIO_LOGIN
+        row = conn.execute(
+            "SELECT COUNT(*) as n FROM login_falhas WHERE email=? AND ts > ?", (email, limite)
+        ).fetchone()
+        return row["n"] >= self.MAX_TENTATIVAS_LOGIN
+
     def create_session(self, email):
         token = uuid.uuid4().hex
         conn = self._conn()
@@ -596,12 +640,26 @@ class Store:
         conn.commit()
         return token
 
+    # Checklist de segurança 2026-09-07 (item 3) - achado real: token de
+    # sessão da carteira nunca expirava. Se o celular fosse perdido/
+    # roubado, quem pegasse o token guardado no navegador conseguiria
+    # usar a carteira pra sempre, mesmo depois de trocar a senha. 30 dias
+    # equilibra não pedir login toda hora (a pessoa só usa a carteira de
+    # vez em quando) com não deixar um token perdido valer pra sempre.
+    SESSAO_VALIDADE_SEGUNDOS = 30 * 24 * 60 * 60  # 30 dias
+
     def get_session_email(self, token):
         if not token:
             return None
         conn = self._conn()
-        row = conn.execute("SELECT email FROM sessions WHERE token=?", (token,)).fetchone()
-        return row["email"] if row else None
+        row = conn.execute(
+            "SELECT email, created_ts FROM sessions WHERE token=?", (token,)
+        ).fetchone()
+        if not row:
+            return None
+        if time.time() - row["created_ts"] > self.SESSAO_VALIDADE_SEGUNDOS:
+            return None
+        return row["email"]
 
     def debitar(self, email, valor):
         """Debita `valor` da conta - atômico dentro da própria transação
@@ -1204,7 +1262,15 @@ def api_auth_register():
     if not ok:
         return _cors(jsonify({"ok": False, "error": "esse e-mail já tem conta"})), 409
     token = store.create_session(email)
-    return _cors(jsonify({"ok": True, "name": name, "token": token, "saldo": 1000}))
+    # Achado avulso conferindo o item 5 do checklist: aqui ficou "saldo":
+    # 1000 chumbado no código desde o Estágio 1 (nunca corrigido quando
+    # trocamos pro Oceano Livre de verdade, embora hoje bata por
+    # coincidência - o bônus de lá também é 1000). app.js não usa esse
+    # campo (conferido), mas deixar errado no código é ruim pra quem
+    # for mexer depois. Consulta o valor real em vez de chumbar.
+    status, resp = _garantir_conta_oceano_livre(email)
+    saldo_real = resp.get("saldo_on", 0) if status not in (0,) else 0
+    return _cors(jsonify({"ok": True, "name": name, "token": token, "saldo": saldo_real}))
 
 
 @app.route("/api/auth/login", methods=["POST", "OPTIONS"])
@@ -1214,8 +1280,19 @@ def api_auth_login():
     data = request.get_json(force=True) or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
+    # Checklist de segurança 2026-09-07 (item 2) - achado real na
+    # avaliação: login aceitava tentativas infinitas de senha, sem
+    # bloqueio nenhum (força bruta viável contra senha fraca). Checagem
+    # ANTES de olhar a senha - nem gasta tempo comparando hash se já
+    # está bloqueado.
+    if store.bloqueado_por_tentativas(email):
+        return _cors(jsonify({
+            "ok": False,
+            "error": "muitas tentativas erradas - espera uns minutos e tenta de novo",
+        })), 429
     account = store.get_account(email)
     if not account or not check_password_hash(account["password_hash"], password):
+        store.registrar_falha_login(email)
         return _cors(jsonify({"ok": False, "error": "e-mail ou senha incorretos"})), 401
     token = store.create_session(email)
     return _cors(jsonify({"ok": True, "name": account["name"], "token": token, "saldo": account["saldo"]}))
@@ -1249,10 +1326,10 @@ def _oceano_livre_call(method, path, body=None):
     import urllib.error
     url = f"{OCEANO_LIVRE_URL}{path}"
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        url, data=data, method=method,
-        headers={"Content-Type": "application/json"} if data else {},
-    )
+    headers = {"Content-Type": "application/json"} if data else {}
+    if OCEANO_API_KEY:
+        headers["X-Oceano-Key"] = OCEANO_API_KEY
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, json.loads(resp.read().decode())
@@ -2252,6 +2329,14 @@ def _mime_real(data: bytes, filename: str) -> str:
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
 
+def _com_chave(url):
+    """Anexa ?key=... num link interno das páginas de debug, quando
+    KRAKEN_API_KEY está definida - sem isso, clicar em 'voltar'/'ver
+    áudios' pediria a chave de novo a cada clique (checklist de
+    segurança 2026-09-07 item 4)."""
+    return f"{url}?key={KRAKEN_API_KEY}" if KRAKEN_API_KEY else url
+
+
 @app.route("/debug/audio/<msg_id>")
 def debug_audio(msg_id):
     """Diagnóstico direto do arquivo de áudio armazenado - sem precisar
@@ -2262,6 +2347,9 @@ def debug_audio(msg_id):
     código sem nunca ver o arquivo real, essa rota lê os primeiros bytes
     (assinatura/magic number) direto do storage do próprio app e devolve
     como texto simples - só precisa abrir o link, sem download nenhum."""
+    erro = _checar_api_key()
+    if erro:
+        return erro
     conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     row = conn.execute(
@@ -2299,7 +2387,7 @@ def debug_audio(msg_id):
         f"<p style='font-family:monospace;word-break:break-all;background:#f5f2fa;padding:8px;border-radius:6px'>{data[:32].hex()}</p>"
         f"<p style='color:#888'>primeiros 32 bytes (texto, ilegível vira '.'):</p>"
         f"<p style='font-family:monospace;word-break:break-all;background:#f5f2fa;padding:8px;border-radius:6px'>{ascii_preview}</p>"
-        "<p><a href='/debug/audio' style='color:#7B2CBF'>← Voltar</a></p>"
+        f"<p><a href='{_com_chave('/debug/audio')}' style='color:#7B2CBF'>← Voltar</a></p>"
         "</body></html>",
         mimetype="text/html",
     )
@@ -2309,6 +2397,9 @@ def debug_audio(msg_id):
 def debug_audio_list():
     """Lista as últimas mensagens de áudio com link direto pro diagnóstico
     de cada uma - pra não precisar catar msg_id na mão."""
+    erro = _checar_api_key()
+    if erro:
+        return erro
     conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
@@ -2316,7 +2407,7 @@ def debug_audio_list():
     ).fetchall()
     conn.close()
     linhas = "".join(
-        f'<li style="margin-bottom:10px"><a href="/debug/audio/{r["id"]}" '
+        f'<li style="margin-bottom:10px"><a href="{_com_chave("/debug/audio/" + r["id"])}" '
         f'style="color:#7B2CBF;font-weight:600">{r["file_name"]}</a><br>'
         f'<span style="color:#888;font-size:12px">{r["sender_name"]} — '
         f'{time.strftime("%d/%m %H:%M:%S", time.localtime(r["ts"]))}</span></li>'
@@ -2329,7 +2420,7 @@ def debug_audio_list():
         "<body style='font-family:sans-serif;padding:16px'>"
         "<h3>🔍 Áudios recentes</h3>"
         f"<ul style='list-style:none;padding:0'>{linhas or '<li>Nenhum áudio ainda.</li>'}</ul>"
-        "<p><a href='/debug' style='color:#7B2CBF'>← Voltar</a></p>"
+        f"<p><a href='{_com_chave('/debug')}' style='color:#7B2CBF'>← Voltar</a></p>"
         "</body></html>",
         mimetype="text/html",
     )
@@ -2364,6 +2455,9 @@ def _fmt_age(ts):
 
 @app.route("/debug")
 def debug_page():
+    erro = _checar_api_key()
+    if erro:
+        return erro
     peers = mesh.live_peers()
     rows = []
     for pid, info in peers.items():
@@ -2416,7 +2510,7 @@ def debug_page():
     <h2>Diagnóstico de áudio</h2>
     <p>Lê o formato real (magic bytes) de cada mensagem de voz gravada, direto do
     storage do app — sem precisar exportar/baixar arquivo nenhum.</p>
-    <p><a class="btn" href="/debug/audio">🔍 Ver áudios gravados</a></p>
+    <p><a class="btn" href="{_com_chave('/debug/audio')}">🔍 Ver áudios gravados</a></p>
 
     <h2>Erros do próprio app (JavaScript)</h2>
     <p class="dim">Capturados automaticamente (erro não tratado ou promessa rejeitada sem
