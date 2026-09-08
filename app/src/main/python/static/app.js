@@ -232,6 +232,7 @@
     callState = null;
     callScreen.classList.add("hidden");
     callRemoteVideo.srcObject = null;
+    callRemoteVideo.classList.add("esperando");
     callLocalVideo.srcObject = null;
     callAcceptBtn.classList.add("hidden");
     callRejectBtn.classList.add("hidden");
@@ -346,6 +347,7 @@
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pc.ontrack = (e) => {
       callRemoteVideo.srcObject = e.streams[0];
+      callRemoteVideo.classList.remove("esperando");
     };
     return pc;
   }

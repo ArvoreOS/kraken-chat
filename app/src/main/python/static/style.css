@@ -460,6 +460,12 @@ body {
   object-fit: cover;
   background: #101014;
 }
+/* Achado real do Gilcimar (2026-09-08): enquanto a chamada ainda está
+   "chamando" (ninguém atendeu, sem faixa de vídeo remota nenhuma ainda),
+   o <video> vazio aparecia com um ícone gigante de "play" no meio da
+   tela (decoração padrão do WebView pra um elemento de vídeo sem fonte
+   nenhuma) - escondido até o pc.ontrack chegar de verdade. */
+.call-remote-video.esperando { opacity: 0; }
 .call-local-video {
   position: absolute;
   top: max(16px, env(safe-area-inset-top));
