@@ -153,6 +153,30 @@ def _enviar_codigo_2fa(email_destino, codigo):
         s.login(SMTP_EMAIL, SMTP_SENHA)
         s.sendmail(SMTP_EMAIL, [email_destino], msg.as_string())
 
+
+def _enviar_codigo_recuperacao(email_destino, codigo):
+    """Checklist de segurança 2026-09-07 (achado real do Gilcimar: a tela
+    de login não tinha 'esqueci minha senha' nenhum - quem esquecesse
+    ficava sem jeito de recuperar a conta). Mesmo mecanismo do 2FA (SMTP
+    já configurado e testado), e-mail e texto diferentes de propósito -
+    confundir os dois (o código de 2FA com o de reset de senha) seria
+    fácil se fosse o mesmo assunto/corpo."""
+    import smtplib
+    from email.mime.text import MIMEText
+    msg = MIMEText(
+        f"Alguém (esperamos que você) pediu pra trocar a senha da sua conta do Kraken.\n\n"
+        f"Seu código de recuperação é: {codigo}\n\n"
+        "Ele vale por 30 minutos. Se você não pediu isso, ignore este e-mail - "
+        "sua senha continua a mesma até alguém usar esse código."
+    )
+    msg["Subject"] = f"{codigo} - recuperar senha do Kraken"
+    msg["From"] = SMTP_EMAIL
+    msg["To"] = email_destino
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as s:
+        s.starttls()
+        s.login(SMTP_EMAIL, SMTP_SENHA)
+        s.sendmail(SMTP_EMAIL, [email_destino], msg.as_string())
+
 # ✅ RESTAURADO (2026-09-07) - achado real fazendo uma avaliação de
 # segurança pedida pelo Gilcimar: essa proteção tinha sido criada em
 # 19/08/2026 (rotas de escrita do nó-semente completamente sem
@@ -486,6 +510,30 @@ class Store:
                 tentativas INTEGER DEFAULT 0
             )
         """)
+        # Achado real do Gilcimar (2026-09-07): não existia jeito nenhum de
+        # recuperar a senha esquecida - tela de login só tinha "criar
+        # conta". Tabela separada da de 2FA de propósito (email é PK nas
+        # duas - se fossem a mesma tabela, pedir "esqueci a senha" bem na
+        # hora que um login com 2FA está pendente apagaria o código de 2FA
+        # da pessoa, ou vice-versa).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS codigos_recuperacao (
+                email TEXT PRIMARY KEY,
+                codigo TEXT,
+                ts REAL,
+                tentativas INTEGER DEFAULT 0
+            )
+        """)
+        # Limite de pedidos de recuperação por conta - sem isso, dava pra
+        # usar o "esqueci minha senha" pra mandar e-mail sem parar pro
+        # inbox de qualquer um só sabendo o e-mail (spam), mesma categoria
+        # de achado do rate limit de login (item 2).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pedidos_recuperacao_senha (
+                email TEXT,
+                ts REAL
+            )
+        """)
         # Carteira Exaguinon (Estágio 1, 2026-09-07) - livro-razão simples de
         # "on" só pra testar a LÓGICA de presentear entre Kraken e Oceano
         # Livre, sem tocar em blockchain ainda (pedido do Gilcimar). Só faz
@@ -710,6 +758,67 @@ class Store:
         conn.execute("DELETE FROM codigos_2fa WHERE email=?", (email,))  # código de uso único
         conn.commit()
         return True
+
+    # ---------- recuperação de senha (achado real do Gilcimar, 2026-09-07) ----------
+    MAX_PEDIDOS_RECUPERACAO = 3
+    JANELA_PEDIDOS_RECUPERACAO = 60 * 60  # 1 hora
+
+    def muitos_pedidos_recuperacao(self, email):
+        conn = self._conn()
+        limite = time.time() - self.JANELA_PEDIDOS_RECUPERACAO
+        row = conn.execute(
+            "SELECT COUNT(*) as n FROM pedidos_recuperacao_senha WHERE email=? AND ts > ?", (email, limite)
+        ).fetchone()
+        return row["n"] >= self.MAX_PEDIDOS_RECUPERACAO
+
+    def registrar_pedido_recuperacao(self, email):
+        conn = self._conn()
+        conn.execute("INSERT INTO pedidos_recuperacao_senha (email, ts) VALUES (?,?)", (email, time.time()))
+        conn.commit()
+
+    def criar_codigo_recuperacao(self, email, codigo):
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO codigos_recuperacao (email, codigo, ts, tentativas) VALUES (?,?,?,0) "
+            "ON CONFLICT(email) DO UPDATE SET codigo=excluded.codigo, ts=excluded.ts, tentativas=0",
+            (email, codigo, time.time()),
+        )
+        conn.commit()
+
+    def verificar_codigo_recuperacao(self, email, codigo, validade_segundos=1800, max_tentativas=5):
+        """Mesma lógica do verificar_codigo_2fa (uso único, trava depois de
+        max_tentativas, expira sozinho) - validade mais longa (30min em vez
+        de 10) porque aqui a pessoa precisa abrir o e-mail E pensar numa
+        senha nova, não só copiar 6 dígitos na hora."""
+        conn = self._conn()
+        row = conn.execute("SELECT * FROM codigos_recuperacao WHERE email=?", (email,)).fetchone()
+        if not row:
+            return False
+        if row["tentativas"] >= max_tentativas:
+            return False
+        if time.time() - row["ts"] > validade_segundos:
+            return False
+        conn.execute("UPDATE codigos_recuperacao SET tentativas = tentativas + 1 WHERE email=?", (email,))
+        conn.commit()
+        if row["codigo"] != codigo:
+            return False
+        conn.execute("DELETE FROM codigos_recuperacao WHERE email=?", (email,))  # código de uso único
+        conn.commit()
+        return True
+
+    def atualizar_senha(self, email, password_hash):
+        conn = self._conn()
+        conn.execute("UPDATE accounts SET password_hash=? WHERE email=?", (password_hash, email))
+        conn.commit()
+
+    def invalidar_sessoes(self, email):
+        """Desloga a conta de todo aparelho - depois de trocar a senha (seja
+        porque esqueceu ou porque alguém mais pode ter descoberto a antiga),
+        um token de sessão antigo guardado em algum navegador/celular não
+        deveria continuar valendo pra sempre."""
+        conn = self._conn()
+        conn.execute("DELETE FROM sessions WHERE email=?", (email,))
+        conn.commit()
 
     # ---------- carteira Exaguinon (Estágio 1 - livro-razão, sem blockchain ainda) ----------
     # ---------- checklist de segurança 2026-09-07 (item 2) - rate limit de login ----------
@@ -1436,6 +1545,66 @@ def api_auth_verify_2fa():
     account = store.get_account(email)
     if not account:
         return _cors(jsonify({"ok": False, "error": "conta não encontrada"})), 404
+    token = store.create_session(email)
+    return _cors(jsonify({
+        "ok": True, "name": account["name"], "token": token,
+        "foto_id": account.get("foto_id"),
+    }))
+
+
+# ---------- recuperação de senha (achado real do Gilcimar, 2026-09-07) ----------
+# A tela de login só tinha "criar conta" - ninguém tinha jeito de recuperar
+# o acesso se esquecesse a senha. Mesmo padrão do 2FA (código de 6 dígitos
+# por e-mail), mas propositalmente NUNCA revela se um e-mail tem conta ou
+# não (resposta {ok:true} sempre, com ou sem conta, com ou sem bloqueio de
+# limite de pedidos) - evita que alguém use "esqueci minha senha" pra
+# descobrir quem tem conta no Kraken só tentando e-mails.
+@app.route("/api/auth/forgot_password", methods=["POST", "OPTIONS"])
+def api_auth_forgot_password():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    resposta_generica = _cors(jsonify({
+        "ok": True,
+        "mensagem": "se esse e-mail tiver conta, um código de recuperação foi mandado pra ele",
+    }))
+    if not email or not _EMAIL_RE.match(email):
+        return resposta_generica
+    if store.muitos_pedidos_recuperacao(email):
+        return resposta_generica  # limite estourado - não manda de novo, mas não avisa disso
+    account = store.get_account(email)
+    if not account:
+        return resposta_generica  # e-mail sem conta - mesma resposta, não revela nada
+    store.registrar_pedido_recuperacao(email)
+    codigo = f"{secrets.randbelow(1000000):06d}"
+    store.criar_codigo_recuperacao(email, codigo)
+    try:
+        _enviar_codigo_recuperacao(email, codigo)
+    except Exception:
+        pass  # não revela falha de SMTP pro cliente - mesmo motivo de não revelar se a conta existe
+    return resposta_generica
+
+
+@app.route("/api/auth/reset_password", methods=["POST", "OPTIONS"])
+def api_auth_reset_password():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    codigo = (data.get("codigo") or "").strip()
+    nova_senha = data.get("nova_senha") or ""
+    if len(nova_senha) < 6:
+        return _cors(jsonify({"ok": False, "error": "senha precisa de pelo menos 6 caracteres"})), 400
+    if not store.verificar_codigo_recuperacao(email, codigo):
+        return _cors(jsonify({"ok": False, "error": "código incorreto ou expirado"})), 401
+    account = store.get_account(email)
+    if not account:
+        return _cors(jsonify({"ok": False, "error": "conta não encontrada"})), 404
+    store.atualizar_senha(email, generate_password_hash(nova_senha))
+    # Troca de senha desloga de todo aparelho - inclui o caso de alguém
+    # mais ter descoberto a senha antiga e ser essa a razão de trocar.
+    store.invalidar_sessoes(email)
     token = store.create_session(email)
     return _cors(jsonify({
         "ok": True, "name": account["name"], "token": token,
