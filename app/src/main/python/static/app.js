@@ -114,6 +114,8 @@
   const galleryGrid = document.getElementById("gallery-grid");
   const aboutName = document.getElementById("about-name");
   const aboutNodeId = document.getElementById("about-node-id");
+  const btn2faToggle = document.getElementById("btn-2fa-toggle");
+  const profile2faSection = document.getElementById("profile-2fa-section");
   const mediaViewer = document.getElementById("media-viewer");
   const mediaViewerClose = document.getElementById("media-viewer-close");
   const mediaViewerContent = document.getElementById("media-viewer-content");
@@ -1741,16 +1743,74 @@
       // inicial pra perfil de terceiros, sem inventar dado que não existe.
       profileAvatarBig.textContent = avatarInitial(displayName);
       aboutNodeId.textContent = profileTarget.id || "—";
+      profile2faSection.classList.add("hidden"); // 2FA só existe pro PRÓPRIO perfil
     } else {
       await ensureMyIdentity();
       renderAvatar(profileAvatarBig, displayName, myFotoId());
       aboutNodeId.textContent = myNodeId || "—";
+      profile2faSection.classList.remove("hidden");
+      refresh2faButton();
     }
     syncProfileModeBadge();
     switchProfileTab("galeria");
     renderGallery();
     profileScreen.classList.remove("hidden");
   }
+
+  // Checklist 2026-09-07 (item 8) - 2FA por e-mail. Consulta o estado
+  // real no nó-semente toda vez que abre o próprio perfil (não confia
+  // em cache local - é config de segurança, quer sempre o dado atual).
+  let duploFatorAtivo = false;
+  async function refresh2faButton() {
+    btn2faToggle.textContent = "…";
+    btn2faToggle.disabled = true;
+    const token = await ensureWalletToken();
+    if (!token) { btn2faToggle.textContent = "indisponível offline"; return; }
+    try {
+      const res = await fetch(`${seedHttpUrl}/api/profile/get`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const data = await res.json();
+      duploFatorAtivo = !!data.duplo_fator;
+      btn2faToggle.textContent = duploFatorAtivo ? "Desativar" : "Ativar";
+      btn2faToggle.disabled = false;
+    } catch (e) {
+      btn2faToggle.textContent = "erro ao consultar";
+    }
+  }
+
+  btn2faToggle.addEventListener("click", async () => {
+    const token = await ensureWalletToken();
+    if (!token) return;
+    const acaoTexto = duploFatorAtivo ? "desativar" : "ativar";
+    const senha = prompt(`Confirma sua senha pra ${acaoTexto} a verificação em duas etapas:`);
+    if (!senha) return;
+    btn2faToggle.disabled = true;
+    try {
+      const res = await fetch(`${seedHttpUrl}/api/profile/2fa`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, password: senha, ativo: !duploFatorAtivo }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(data.error || `não deu pra ${acaoTexto}`);
+        refresh2faButton();
+        return;
+      }
+      duploFatorAtivo = data.duplo_fator;
+      btn2faToggle.textContent = duploFatorAtivo ? "Desativar" : "Ativar";
+      btn2faToggle.disabled = false;
+      alert(duploFatorAtivo
+        ? "Verificação em duas etapas ativada - a partir de agora, todo login vai pedir um código mandado pro seu e-mail."
+        : "Verificação em duas etapas desativada.");
+    } catch (e) {
+      alert("erro: " + (e && e.message ? e.message : e));
+      refresh2faButton();
+    }
+  });
 
   function closeProfile() {
     profileScreen.classList.add("hidden");
@@ -2072,11 +2132,30 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      let data = await res.json();
       if (!res.ok || !data.ok) {
         loginError.textContent = data.error || "Não deu certo. Tenta de novo.";
         loginError.classList.remove("hidden");
         return;
+      }
+      // Checklist 2026-09-07 (item 8) - conta com 2FA por e-mail ligado:
+      // login com senha certa não devolve token ainda, só avisa que um
+      // código foi mandado. Pede o código e troca pela resposta de
+      // verdade (token/nome/foto) antes de seguir com o fluxo normal.
+      if (data.precisa_2fa) {
+        const codigo = prompt("Mandamos um código de 6 dígitos pro seu e-mail. Digite ele aqui:");
+        if (!codigo) return;
+        const res2 = await fetch(`${seedHttpUrl}/api/auth/verify_2fa`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, codigo }),
+        });
+        data = await res2.json();
+        if (!res2.ok || !data.ok) {
+          loginError.textContent = data.error || "Código incorreto.";
+          loginError.classList.remove("hidden");
+          return;
+        }
       }
       // Checklist 2026-09-07 (item 6) - nome/foto agora vêm da CONTA, não
       // do aparelho. Login/cadastro sempre devolvem o nome/foto atuais

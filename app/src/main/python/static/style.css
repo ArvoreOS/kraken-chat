@@ -731,6 +731,9 @@ body {
 }
 .profile-about-row span { color: #888; }
 .profile-about-row b { color: var(--texto); font-weight: 600; text-align: right; word-break: break-all; }
+.profile-2fa { margin-top: 18px; }
+.profile-2fa .profile-about-row span { max-width: 65%; }
+.profile-2fa .btn { white-space: nowrap; }
 .media-viewer {
   position: fixed; inset: 0; background: rgba(0,0,0,.92); z-index: 60;
   display: flex; align-items: center; justify-content: center;

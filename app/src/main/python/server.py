@@ -31,6 +31,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import secrets
 import socket
 import sqlite3
 import sys
@@ -123,6 +124,34 @@ OCEANO_LIVRE_URL = os.environ.get("KRAKEN_OCEANO_LIVRE_URL", "http://localhost:5
 # verdade quando as duas env vars (aqui e lá) estão definidas com o
 # mesmo valor, no nó-semente de produção.
 OCEANO_API_KEY = os.environ.get("KRAKEN_OCEANO_API_KEY", "")
+# Checklist de segurança 2026-09-07 (item 8) - 2FA por e-mail. Mesma
+# conta/senha de app já usada e confirmada funcionando no R72
+# (adalina.r72legion@gmail.com) - ver [[reference_ssh...]]/memória do
+# projeto. Vazio = 2FA por e-mail nunca pode ser ativado (falha segura:
+# sem credencial configurada, a conta simplesmente rejeita ativar em vez
+# de tentar mandar e-mail e falhar silenciosamente).
+SMTP_EMAIL = os.environ.get("KRAKEN_SMTP_EMAIL", "")
+SMTP_SENHA = os.environ.get("KRAKEN_SMTP_SENHA", "")
+
+
+def _enviar_codigo_2fa(email_destino, codigo):
+    """Manda o código de 6 dígitos por e-mail. Levanta exceção se falhar -
+    quem chama decide o que fazer (não regenera um código novo se o
+    e-mail nem saiu, senão a pessoa via 2 códigos diferentes sem saber
+    qual usar)."""
+    import smtplib
+    from email.mime.text import MIMEText
+    msg = MIMEText(
+        f"Seu código de verificação do Kraken é: {codigo}\n\n"
+        "Ele vale por 10 minutos. Se você não pediu esse código, ignore este e-mail."
+    )
+    msg["Subject"] = f"{codigo} é seu código do Kraken"
+    msg["From"] = SMTP_EMAIL
+    msg["To"] = email_destino
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as s:
+        s.starttls()
+        s.login(SMTP_EMAIL, SMTP_SENHA)
+        s.sendmail(SMTP_EMAIL, [email_destino], msg.as_string())
 
 # ✅ RESTAURADO (2026-09-07) - achado real fazendo uma avaliação de
 # segurança pedida pelo Gilcimar: essa proteção tinha sido criada em
@@ -443,6 +472,20 @@ class Store:
         # descubra quem tem conta só tentando e-mails na URL.
         if "foto_id" not in existing_account_cols:
             conn.execute("ALTER TABLE accounts ADD COLUMN foto_id TEXT")
+        # Checklist 2026-09-07 (item 8) - autenticação de dois fatores por
+        # e-mail (só código por e-mail nesta 1ª parte - biometria fica
+        # pra depois, precisa de código nativo Android, não dá pra fazer
+        # só em Python/JS de forma confiável em WebView).
+        if "duplo_fator" not in existing_account_cols:
+            conn.execute("ALTER TABLE accounts ADD COLUMN duplo_fator INTEGER DEFAULT 0")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS codigos_2fa (
+                email TEXT PRIMARY KEY,
+                codigo TEXT,
+                ts REAL,
+                tentativas INTEGER DEFAULT 0
+            )
+        """)
         # Carteira Exaguinon (Estágio 1, 2026-09-07) - livro-razão simples de
         # "on" só pra testar a LÓGICA de presentear entre Kraken e Oceano
         # Livre, sem tocar em blockchain ainda (pedido do Gilcimar). Só faz
@@ -611,7 +654,8 @@ class Store:
     def get_account(self, email):
         conn = self._conn()
         row = conn.execute(
-            "SELECT email, password_hash, name, saldo, foto_id FROM accounts WHERE email=?", (email,)
+            "SELECT email, password_hash, name, saldo, foto_id, duplo_fator FROM accounts WHERE email=?",
+            (email,),
         ).fetchone()
         return dict(row) if row else None
 
@@ -629,6 +673,43 @@ class Store:
         conn = self._conn()
         conn.execute("UPDATE accounts SET foto_id=? WHERE email=?", (foto_id, email))
         conn.commit()
+
+    # ---------- checklist 2026-09-07 (item 8) - 2FA por e-mail ----------
+    def set_duplo_fator(self, email, ativo):
+        conn = self._conn()
+        conn.execute("UPDATE accounts SET duplo_fator=? WHERE email=?", (1 if ativo else 0, email))
+        conn.commit()
+
+    def criar_codigo_2fa(self, email, codigo):
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO codigos_2fa (email, codigo, ts, tentativas) VALUES (?,?,?,0) "
+            "ON CONFLICT(email) DO UPDATE SET codigo=excluded.codigo, ts=excluded.ts, tentativas=0",
+            (email, codigo, time.time()),
+        )
+        conn.commit()
+
+    def verificar_codigo_2fa(self, email, codigo, validade_segundos=600, max_tentativas=5):
+        """Retorna True se o código bate e ainda está dentro da validade.
+        Cada tentativa (certa ou errada) conta - depois de max_tentativas
+        o código fica inutilizado mesmo que a pessoa acerte depois (evita
+        forçar bruta os 6 dígitos, ~1 milhão de combinações, tentativa
+        ilimitada tornaria isso viável)."""
+        conn = self._conn()
+        row = conn.execute("SELECT * FROM codigos_2fa WHERE email=?", (email,)).fetchone()
+        if not row:
+            return False
+        if row["tentativas"] >= max_tentativas:
+            return False
+        if time.time() - row["ts"] > validade_segundos:
+            return False
+        conn.execute("UPDATE codigos_2fa SET tentativas = tentativas + 1 WHERE email=?", (email,))
+        conn.commit()
+        if row["codigo"] != codigo:
+            return False
+        conn.execute("DELETE FROM codigos_2fa WHERE email=?", (email,))  # código de uso único
+        conn.commit()
+        return True
 
     # ---------- carteira Exaguinon (Estágio 1 - livro-razão, sem blockchain ainda) ----------
     # ---------- checklist de segurança 2026-09-07 (item 2) - rate limit de login ----------
@@ -1319,6 +1400,18 @@ def api_auth_login():
     if not account or not check_password_hash(account["password_hash"], password):
         store.registrar_falha_login(email)
         return _cors(jsonify({"ok": False, "error": "e-mail ou senha incorretos"})), 401
+    # Checklist 2026-09-07 (item 8) - se a conta tem 2FA por e-mail
+    # ativado, senha certa NÃO é suficiente ainda - manda o código e
+    # devolve sem token nenhum. Token só sai depois de confirmar o
+    # código em /api/auth/verify_2fa.
+    if account.get("duplo_fator"):
+        codigo = f"{secrets.randbelow(1000000):06d}"
+        store.criar_codigo_2fa(email, codigo)
+        try:
+            _enviar_codigo_2fa(email, codigo)
+        except Exception as e:
+            return _cors(jsonify({"ok": False, "error": f"não consegui mandar o código: {e}"})), 502
+        return _cors(jsonify({"ok": True, "precisa_2fa": True}))
     token = store.create_session(email)
     # ✅ CORRIGIDO (mesmo achado do registro, ver comentário lá) - login
     # não deve esperar o Oceano Livre pra responder (achado real: chegou
@@ -1329,6 +1422,46 @@ def api_auth_login():
         "ok": True, "name": account["name"], "token": token,
         "foto_id": account.get("foto_id"),
     }))
+
+
+@app.route("/api/auth/verify_2fa", methods=["POST", "OPTIONS"])
+def api_auth_verify_2fa():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    codigo = (data.get("codigo") or "").strip()
+    if not store.verificar_codigo_2fa(email, codigo):
+        return _cors(jsonify({"ok": False, "error": "código incorreto ou expirado"})), 401
+    account = store.get_account(email)
+    if not account:
+        return _cors(jsonify({"ok": False, "error": "conta não encontrada"})), 404
+    token = store.create_session(email)
+    return _cors(jsonify({
+        "ok": True, "name": account["name"], "token": token,
+        "foto_id": account.get("foto_id"),
+    }))
+
+
+@app.route("/api/profile/2fa", methods=["POST", "OPTIONS"])
+def api_profile_2fa():
+    """Liga/desliga o 2FA por e-mail da própria conta. Pede a SENHA de
+    novo (não só o token) pra ativar/desativar - mudar uma configuração
+    de segurança importante não deveria bastar ter o token guardado no
+    navegador, mesma lógica de "confirme sua senha" que sites sérios
+    pedem pra esse tipo de mudança."""
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    email = store.get_session_email(data.get("token"))
+    if not email:
+        return _cors(jsonify({"ok": False, "error": "sessão expirada - faça login de novo"})), 401
+    account = store.get_account(email)
+    if not check_password_hash(account["password_hash"], data.get("password") or ""):
+        return _cors(jsonify({"ok": False, "error": "senha incorreta"})), 401
+    ativo = bool(data.get("ativo"))
+    store.set_duplo_fator(email, ativo)
+    return _cors(jsonify({"ok": True, "duplo_fator": ativo}))
 
 
 # ---------- perfil vinculado à conta (checklist 2026-09-07, item 6) ----------
@@ -1349,7 +1482,10 @@ def api_profile_get():
     if not email:
         return _cors(jsonify({"ok": False, "error": "sessão expirada - faça login de novo"})), 401
     account = store.get_account(email)
-    return _cors(jsonify({"ok": True, "name": account["name"], "foto_id": account.get("foto_id")}))
+    return _cors(jsonify({
+        "ok": True, "name": account["name"], "foto_id": account.get("foto_id"),
+        "duplo_fator": bool(account.get("duplo_fator")),
+    }))
 
 
 @app.route("/api/profile/update_name", methods=["POST", "OPTIONS"])
