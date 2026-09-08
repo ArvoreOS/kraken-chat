@@ -154,6 +154,9 @@
   <video id="call-local-video" class="call-local-video" autoplay playsinline muted></video>
   <div class="call-status" id="call-status-text"></div>
   <div class="call-controls">
+    <!-- Achado real do Gilcimar (2026-09-08): nem a chamada nem a live
+         tinham opção de trocar entre câmera frontal e traseira. -->
+    <button type="button" id="call-switch-cam-btn" class="call-btn call-switch-cam hidden" title="Trocar câmera (frente/trás)">🔄</button>
     <button type="button" id="call-mute-btn" class="call-btn call-mute hidden" title="Mutar/desmutar microfone">🎤</button>
     <button type="button" id="call-accept-btn" class="call-btn call-accept hidden">✅ Atender</button>
     <button type="button" id="call-reject-btn" class="call-btn call-reject hidden">✕ Recusar</button>
@@ -165,6 +168,9 @@
   <video id="live-video" class="live-video" autoplay playsinline></video>
   <div class="live-status" id="live-status-text"></div>
   <div class="call-controls">
+    <!-- Só aparece pra quem está TRANSMITINDO (broadcaster) - quem só está
+         assistindo (viewer) não tem câmera nenhuma pra trocar. -->
+    <button type="button" id="live-switch-cam-btn" class="call-btn call-switch-cam hidden" title="Trocar câmera (frente/trás)">🔄</button>
     <button type="button" id="live-stop-btn" class="call-btn call-hangup hidden">Encerrar</button>
   </div>
 </div>

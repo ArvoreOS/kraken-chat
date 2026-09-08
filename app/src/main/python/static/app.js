@@ -201,6 +201,7 @@
   const callRejectBtn = document.getElementById("call-reject-btn");
   const callHangupBtn = document.getElementById("call-hangup-btn");
   const callMuteBtn = document.getElementById("call-mute-btn");
+  const callSwitchCamBtn = document.getElementById("call-switch-cam-btn");
   const btnCall = document.getElementById("btn-call");
   const btnGift = document.getElementById("btn-gift");
   const btnBroadcast = document.getElementById("btn-broadcast");
@@ -215,6 +216,7 @@
   const mosaicSizePlus = document.getElementById("mosaic-size-plus");
   const mosaicCloseBtn = document.getElementById("mosaic-close-btn");
   const liveStopBtn = document.getElementById("live-stop-btn");
+  const liveSwitchCamBtn = document.getElementById("live-switch-cam-btn");
 
   let callState = null; // {call_id, role, pc, localStream, peer:{id,name,via,ip?,port?}, pendingOffer?}
   let myNodeId = null;
@@ -237,6 +239,8 @@
     callMuteBtn.classList.add("hidden");
     callMuteBtn.classList.remove("muted");
     callMuteBtn.textContent = "🎤";
+    callSwitchCamBtn.classList.add("hidden");
+    callSwitchCamBtn.disabled = false;
   }
 
   // Mostra o botão de mutar só quando existe uma faixa de áudio de verdade
@@ -255,6 +259,45 @@
     callMuteBtn.classList.toggle("muted", !novoEstado);
     callMuteBtn.textContent = novoEstado ? "🎤" : "🔇";
   });
+
+  // Mostra o botão de trocar câmera só quando existe uma faixa de vídeo
+  // de verdade pra trocar (ex: se a câmera nem abriu, a chamada já teria
+  // sido abortada antes de chegar aqui, então isso cobre o caso normal).
+  function updateSwitchCamBtnVisibility() {
+    const hasVideo = callState && callState.localStream && callState.localStream.getVideoTracks().length > 0;
+    callSwitchCamBtn.classList.toggle("hidden", !hasVideo);
+  }
+
+  // Achado real do Gilcimar (2026-09-08): nem a chamada de vídeo nem o
+  // modo live tinham como trocar entre câmera frontal e traseira. Pega
+  // uma faixa de vídeo NOVA da câmera oposta e troca ela no lugar da
+  // antiga - tanto no envio pro outro lado (RTCRtpSender.replaceTrack,
+  // API padrão de WebRTC) quanto no preview local (reconstrói a
+  // MediaStream com a faixa nova).
+  async function trocarCameraChamada() {
+    if (!callState || !callState.localStream || !callState.pc) return;
+    const oldTrack = callState.localStream.getVideoTracks()[0];
+    if (!oldTrack) return;
+    const novoFacing = callState.facingMode === "environment" ? "user" : "environment";
+    callSwitchCamBtn.disabled = true;
+    try {
+      const novaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: novoFacing }, audio: false });
+      const novoTrack = novaStream.getVideoTracks()[0];
+      if (!novoTrack) throw new Error("sem faixa de vídeo nova");
+      const sender = callState.pc.getSenders().find((s) => s.track && s.track.kind === "video");
+      if (sender) await sender.replaceTrack(novoTrack);
+      oldTrack.stop();
+      callState.localStream.removeTrack(oldTrack);
+      callState.localStream.addTrack(novoTrack);
+      callLocalVideo.srcObject = callState.localStream;
+      callState.facingMode = novoFacing;
+    } catch (e) {
+      console.warn("não consegui trocar de câmera na chamada:", e);
+    } finally {
+      callSwitchCamBtn.disabled = false;
+    }
+  }
+  callSwitchCamBtn.addEventListener("click", trocarCameraChamada);
 
   function newCallId() {
     return "call-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
@@ -328,11 +371,16 @@
       return { error: "getUserMedia indisponível nesse navegador (a API só existe em contexto seguro - localhost/https)." };
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      // facingMode "ideal" (não "exact") - continua funcionando normal em
+      // aparelhos sem câmera frontal reconhecida como tal, só prefere ela
+      // quando existe. Torna o ponto de partida determinístico (sempre
+      // frontal), condição pra trocarCameraChamada() saber com certeza
+      // qual câmera trocar DE e PRA.
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
       return { stream };
     } catch (eComAudio) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
         return { stream, semAudio: true, motivoSemAudio: `${eComAudio.name || "Erro"}: ${eComAudio.message || "sem detalhe"}` };
       } catch (eSoVideo) {
         return { error: `${eSoVideo.name || "Erro"}: ${eSoVideo.message || "sem detalhe"}` };
@@ -433,7 +481,7 @@
     }
     const pc = makePeerConnection();
     stream.getTracks().forEach((t) => pc.addTrack(t, stream));
-    callState = { call_id: callId, role: "caller", pc, localStream: stream, peer, semAudio };
+    callState = { call_id: callId, role: "caller", pc, localStream: stream, peer, semAudio, facingMode: "user" };
 
     callScreen.classList.remove("hidden");
     callLocalVideo.srcObject = stream;
@@ -442,6 +490,7 @@
       : `Chamando ${peer.name}…`;
     callHangupBtn.classList.remove("hidden");
     updateMuteBtnVisibility();
+    updateSwitchCamBtnVisibility();
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -585,11 +634,13 @@
     callState.pc = pc;
     callState.localStream = stream;
     callState.semAudio = semAudio;
+    callState.facingMode = "user";
     callLocalVideo.srcObject = stream;
     callAcceptBtn.classList.add("hidden");
     callRejectBtn.classList.add("hidden");
     callHangupBtn.classList.remove("hidden");
     updateMuteBtnVisibility();
+    updateSwitchCamBtnVisibility();
     callStatusText.textContent = semAudio
       ? `Em chamada com ${peer.name} (sem áudio - microfone ocupado)`
       : `Em chamada com ${peer.name}`;
@@ -711,7 +762,44 @@
     liveVideo.srcObject = null;
     liveVideo.muted = false;
     liveStopBtn.classList.add("hidden");
+    liveSwitchCamBtn.classList.add("hidden");
+    liveSwitchCamBtn.disabled = false;
   }
+
+  // Mesma ideia do trocarCameraChamada() (achado real do Gilcimar,
+  // 2026-09-08), mas troca a faixa dentro do Janus (SFU) em vez de um
+  // RTCPeerConnection direto - replaceTracks() já existe vendorizado no
+  // janus.js oficial, faz exatamente o replaceTrack() padrão do WebRTC
+  // por baixo dos panos, escondido atrás da API própria do plugin.
+  async function trocarCameraLive() {
+    if (!liveState || liveState.role !== "broadcaster" || !liveState.localStream || !liveState.handle) return;
+    const oldTrack = liveState.localStream.getVideoTracks()[0];
+    if (!oldTrack) return;
+    const novoFacing = liveState.facingMode === "environment" ? "user" : "environment";
+    liveSwitchCamBtn.disabled = true;
+    try {
+      const novaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: novoFacing }, audio: false });
+      const novoTrack = novaStream.getVideoTracks()[0];
+      if (!novoTrack) throw new Error("sem faixa de vídeo nova");
+      await new Promise((resolve, reject) => {
+        liveState.handle.replaceTracks({
+          tracks: [{ type: "video", capture: novoTrack, replace: true }],
+          success: resolve,
+          error: reject,
+        });
+      });
+      oldTrack.stop();
+      liveState.localStream.removeTrack(oldTrack);
+      liveState.localStream.addTrack(novoTrack);
+      liveVideo.srcObject = liveState.localStream;
+      liveState.facingMode = novoFacing;
+    } catch (e) {
+      console.warn("não consegui trocar de câmera na live:", e);
+    } finally {
+      liveSwitchCamBtn.disabled = false;
+    }
+  }
+  liveSwitchCamBtn.addEventListener("click", trocarCameraLive);
 
   function liveFail(msg) {
     liveReset();
@@ -798,7 +886,10 @@
 
     let stream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      // facingMode "ideal" - mesmo motivo do getCallMediaStream(): ponto de
+      // partida determinístico (sempre frontal), pra trocarCameraLive()
+      // saber com certeza qual câmera trocar DE e PRA.
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
     } catch (e) {
       openModal(`<h3>🔴 Live</h3><p class='muted'>Não consegui acessar câmera/microfone.</p><p class='muted' style="font-size:11px">${e.name || "Erro"}: ${e.message || "sem detalhe"}</p>`);
       return;
@@ -806,11 +897,12 @@
 
     await ensureJanusInit();
 
-    liveState = { role: "broadcaster", room, janusInstance: null, handle: null, localStream: stream };
+    liveState = { role: "broadcaster", room, janusInstance: null, handle: null, localStream: stream, facingMode: "user" };
     liveScreen.classList.remove("hidden");
     liveVideo.muted = true;
     liveVideo.srcObject = stream;
     liveStatusText.textContent = "Preparando transmissão…";
+    liveSwitchCamBtn.classList.remove("hidden");
 
     const opaqueId = "kraken-live-" + Janus.randomString(12);
     const janusInstance = new Janus({

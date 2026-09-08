@@ -502,6 +502,8 @@ body {
 .call-btn.call-reject, .call-btn.call-hangup { background: #E63946; }
 .call-btn.call-mute { background: rgba(255,255,255,.18); padding: 14px 18px; }
 .call-btn.call-mute.muted { background: #E63946; }
+.call-btn.call-switch-cam { background: rgba(255,255,255,.18); padding: 14px 18px; }
+.call-btn.call-switch-cam:disabled { opacity: .5; cursor: default; }
 .modal-list-item:hover { background: var(--bg-bubble-other); }
 
 /* ---------- Live (transmissão pra plateia, via Janus) ---------- */
