@@ -60,6 +60,7 @@ else:
     RESOURCE_DIR = BASE_DIR
     DATA_DIR = BASE_DIR / "data"
 FILES_DIR = DATA_DIR / "files"
+FOTOS_PERFIL_DIR = DATA_DIR / "fotos_perfil"  # checklist 2026-09-07 item 6
 DB_PATH = DATA_DIR / "craque.db"
 NODE_ID_PATH = DATA_DIR / "node_id.txt"
 NODE_KEY_PATH = DATA_DIR / "node_key.bin"
@@ -169,6 +170,7 @@ try:
     # KrakenService chama configure_data_dir() com o diretório certo do app
     # logo depois de importar este módulo, antes de start_server().
     FILES_DIR.mkdir(parents=True, exist_ok=True)
+    FOTOS_PERFIL_DIR.mkdir(parents=True, exist_ok=True)
 except OSError:
     pass
 
@@ -435,6 +437,12 @@ class Store:
         existing_account_cols = {row[1] for row in conn.execute("PRAGMA table_info(accounts)")}
         if "saldo" not in existing_account_cols:
             conn.execute("ALTER TABLE accounts ADD COLUMN saldo REAL DEFAULT 0")
+        # Checklist 2026-09-07 (item 6) - perfil (nome+foto) vinculado à
+        # CONTA, não ao aparelho. `foto_id` é um id aleatório (não o
+        # e-mail) usado na URL pública da foto - evita que alguém
+        # descubra quem tem conta só tentando e-mails na URL.
+        if "foto_id" not in existing_account_cols:
+            conn.execute("ALTER TABLE accounts ADD COLUMN foto_id TEXT")
         # Carteira Exaguinon (Estágio 1, 2026-09-07) - livro-razão simples de
         # "on" só pra testar a LÓGICA de presentear entre Kraken e Oceano
         # Livre, sem tocar em blockchain ainda (pedido do Gilcimar). Só faz
@@ -603,9 +611,24 @@ class Store:
     def get_account(self, email):
         conn = self._conn()
         row = conn.execute(
-            "SELECT email, password_hash, name, saldo FROM accounts WHERE email=?", (email,)
+            "SELECT email, password_hash, name, saldo, foto_id FROM accounts WHERE email=?", (email,)
         ).fetchone()
         return dict(row) if row else None
+
+    def get_account_by_foto_id(self, foto_id):
+        conn = self._conn()
+        row = conn.execute("SELECT email, name FROM accounts WHERE foto_id=?", (foto_id,)).fetchone()
+        return dict(row) if row else None
+
+    def atualizar_nome_perfil(self, email, name):
+        conn = self._conn()
+        conn.execute("UPDATE accounts SET name=? WHERE email=?", (name, email))
+        conn.commit()
+
+    def atualizar_foto_perfil(self, email, foto_id):
+        conn = self._conn()
+        conn.execute("UPDATE accounts SET foto_id=? WHERE email=?", (foto_id, email))
+        conn.commit()
 
     # ---------- carteira Exaguinon (Estágio 1 - livro-razão, sem blockchain ainda) ----------
     # ---------- checklist de segurança 2026-09-07 (item 2) - rate limit de login ----------
@@ -1262,15 +1285,17 @@ def api_auth_register():
     if not ok:
         return _cors(jsonify({"ok": False, "error": "esse e-mail já tem conta"})), 409
     token = store.create_session(email)
-    # Achado avulso conferindo o item 5 do checklist: aqui ficou "saldo":
-    # 1000 chumbado no código desde o Estágio 1 (nunca corrigido quando
-    # trocamos pro Oceano Livre de verdade, embora hoje bata por
-    # coincidência - o bônus de lá também é 1000). app.js não usa esse
-    # campo (conferido), mas deixar errado no código é ruim pra quem
-    # for mexer depois. Consulta o valor real em vez de chumbar.
-    status, resp = _garantir_conta_oceano_livre(email)
-    saldo_real = resp.get("saldo_on", 0) if status not in (0,) else 0
-    return _cors(jsonify({"ok": True, "name": name, "token": token, "saldo": saldo_real}))
+    # ✅ CORRIGIDO (achado testando o item 6 - registrei e o cadastro
+    # ficou LEVANDO ATÉ 4+ SEGUNDOS): a 1ª versão desta correção consultava
+    # o saldo real do Oceano Livre aqui pra devolver certo em vez do
+    # "1000" chumbado antigo - mas isso acopla a VELOCIDADE/disponibilidade
+    # do cadastro (que devia ser instantâneo, é só criar a conta) à
+    # disponibilidade do Oceano Livre, que pode estar lento/fora do ar por
+    # motivo nenhum relacionado a criar uma conta no Kraken. app.js nunca
+    # leu esse campo (conferido) - removido de vez em vez de "corrigido
+    # errado de novo". Quem quiser o saldo chama /api/wallet/balance à
+    # parte, quando precisar de verdade.
+    return _cors(jsonify({"ok": True, "name": name, "token": token, "foto_id": None}))
 
 
 @app.route("/api/auth/login", methods=["POST", "OPTIONS"])
@@ -1295,7 +1320,105 @@ def api_auth_login():
         store.registrar_falha_login(email)
         return _cors(jsonify({"ok": False, "error": "e-mail ou senha incorretos"})), 401
     token = store.create_session(email)
-    return _cors(jsonify({"ok": True, "name": account["name"], "token": token, "saldo": account["saldo"]}))
+    # ✅ CORRIGIDO (mesmo achado do registro, ver comentário lá) - login
+    # não deve esperar o Oceano Livre pra responder (achado real: chegou
+    # a levar 4+ segundos quando ele está inalcançável). "saldo" removido
+    # da resposta - app.js nunca leu esse campo. foto_id fica (é só
+    # leitura local, sem rede nenhuma envolvida).
+    return _cors(jsonify({
+        "ok": True, "name": account["name"], "token": token,
+        "foto_id": account.get("foto_id"),
+    }))
+
+
+# ---------- perfil vinculado à conta (checklist 2026-09-07, item 6) ----------
+# Antes disso, "meu perfil" (nome, e a partir de agora foto) morava só
+# no localStorage do aparelho - login em outro celular com a MESMA conta
+# nunca puxava nome/foto de volta, tinha que digitar/escolher tudo de
+# novo (exatamente o problema que o Gilcimar apontou, e que a gente
+# acabou de viver na pele nesta sessão com o NODE_ID resetando). Nome e
+# foto agora moram na tabela `accounts` do nó-semente - login/cadastro já
+# devolvem eles, e o app.js pode consultar de novo a qualquer momento
+# com o token.
+@app.route("/api/profile/get", methods=["POST", "OPTIONS"])
+def api_profile_get():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    email = store.get_session_email(data.get("token"))
+    if not email:
+        return _cors(jsonify({"ok": False, "error": "sessão expirada - faça login de novo"})), 401
+    account = store.get_account(email)
+    return _cors(jsonify({"ok": True, "name": account["name"], "foto_id": account.get("foto_id")}))
+
+
+@app.route("/api/profile/update_name", methods=["POST", "OPTIONS"])
+def api_profile_update_name():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    data = request.get_json(force=True) or {}
+    email = store.get_session_email(data.get("token"))
+    if not email:
+        return _cors(jsonify({"ok": False, "error": "sessão expirada - faça login de novo"})), 401
+    name = (data.get("name") or "").strip()[:60]
+    if not name:
+        return _cors(jsonify({"ok": False, "error": "nome não pode ficar vazio"})), 400
+    store.atualizar_nome_perfil(email, name)
+    return _cors(jsonify({"ok": True, "name": name}))
+
+
+def _mime_imagem_real(data: bytes):
+    """Detecta PNG/JPEG/WEBP pelos bytes de verdade (magic number) -
+    achado real escrevendo o teste automático deste endpoint: `_mime_real`
+    (usada nas mensagens) NÃO tem checagem de bytes pra imagem nenhuma,
+    só pra áudio - pra imagem ela sempre caía no fallback por extensão do
+    nome do arquivo, o que um upload de foto de perfil não pode aceitar
+    (é literalmente o que estamos tentando evitar). Devolve None se não
+    reconhecer nenhum dos 3 formatos aceitos."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+@app.route("/api/profile/foto", methods=["POST", "OPTIONS"])
+def api_profile_foto():
+    if request.method == "OPTIONS":
+        return _cors(Response(status=204))
+    email = store.get_session_email(request.form.get("token"))
+    if not email:
+        return _cors(jsonify({"ok": False, "error": "sessão expirada - faça login de novo"})), 401
+    f = request.files.get("foto")
+    if not f or not f.filename:
+        return _cors(jsonify({"ok": False, "error": "nenhuma foto enviada"})), 400
+    data = f.read()
+    if len(data) > 5 * 1024 * 1024:
+        return _cors(jsonify({"ok": False, "error": "foto muito grande (máximo 5MB)"})), 400
+    mime = _mime_imagem_real(data)
+    if not mime:
+        return _cors(jsonify({"ok": False, "error": "isso não parece ser uma imagem de verdade (jpg/png/webp)"})), 400
+    foto_id = uuid.uuid4().hex
+    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(mime, "jpg")
+    (FOTOS_PERFIL_DIR / f"{foto_id}.{ext}").write_bytes(data)
+    store.atualizar_foto_perfil(email, foto_id)
+    return _cors(jsonify({"ok": True, "foto_id": foto_id}))
+
+
+@app.route("/api/profile/foto/<foto_id>")
+def api_profile_foto_get(foto_id):
+    # Sem exigir login pra VER - mesma lógica de sempre nesse projeto
+    # (quem já está na conversa já vê o nome de quem mandou cada
+    # mensagem; a foto de perfil é informação do mesmo nível). foto_id é
+    # aleatório (não o e-mail), então não dá pra "adivinhar" a foto de
+    # alguém só tentando e-mails.
+    for ext in ("jpg", "png", "webp"):
+        caminho = FOTOS_PERFIL_DIR / f"{foto_id}.{ext}"
+        if caminho.exists():
+            return send_from_directory(FOTOS_PERFIL_DIR, caminho.name)
+    return jsonify({"ok": False, "error": "foto não encontrada"}), 404
 
 
 # ---------- carteira Exaguinon - ligada de verdade ao Oceano Livre (2026-09-07) ----------
@@ -2629,14 +2752,16 @@ def configure_data_dir(path):
     """Chamado pelo KrakenService (Android) logo após importar o módulo,
     ANTES de start_server(), com o diretório gravável de verdade do app
     (getFilesDir()). Recria tudo que dependia do caminho padrão do Termux."""
-    global DATA_DIR, FILES_DIR, DB_PATH, NODE_ID_PATH, NODE_KEY_PATH
+    global DATA_DIR, FILES_DIR, FOTOS_PERFIL_DIR, DB_PATH, NODE_ID_PATH, NODE_KEY_PATH
     global NODE_ID, NODE_PRIVKEY, NODE_PUBKEY, store, mesh
     DATA_DIR = Path(path)
     FILES_DIR = DATA_DIR / "files"
+    FOTOS_PERFIL_DIR = DATA_DIR / "fotos_perfil"
     DB_PATH = DATA_DIR / "craque.db"
     NODE_ID_PATH = DATA_DIR / "node_id.txt"
     NODE_KEY_PATH = DATA_DIR / "node_key.bin"
     FILES_DIR.mkdir(parents=True, exist_ok=True)
+    FOTOS_PERFIL_DIR.mkdir(parents=True, exist_ok=True)
     NODE_ID = get_node_id()
     NODE_PRIVKEY = _load_or_create_node_key()
     NODE_PUBKEY = NODE_PRIVKEY.public_key

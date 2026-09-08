@@ -60,6 +60,9 @@
   // nó-semente no login/cadastro, guardado aqui pra não precisar pedir
   // e-mail/senha de novo toda vez que a pessoa quiser presentear.
   const STORAGE_WALLET_TOKEN = "kraken_wallet_token";
+  // Foto de perfil vinculada à conta (checklist 2026-09-07, item 6) -
+  // guarda só o ID aqui, os bytes de verdade ficam só no nó-semente.
+  const STORAGE_FOTO_ID = "kraken_foto_id";
 
   const nameScreen = document.getElementById("name-screen");
   const chatScreen = document.getElementById("chat-screen");
@@ -100,6 +103,7 @@
   const profileScreen = document.getElementById("profile-screen");
   const profileBack = document.getElementById("profile-back");
   const profileAvatarBig = document.getElementById("profile-avatar-big");
+  const profileFotoInput = document.getElementById("profile-foto-input");
   const profileNameEl = document.getElementById("profile-name");
   const profileModeBadge = document.getElementById("profile-mode-badge");
   const profileModeBadgeText = document.getElementById("profile-mode-badge-text");
@@ -1609,6 +1613,28 @@
     return n ? n[0].toUpperCase() : "?";
   }
 
+  // Checklist 2026-09-07 (item 6) - renderiza o avatar com foto de
+  // verdade quando existe, caindo pra inicial do nome quando não (mesmo
+  // comportamento de sempre). `fotoId` null/undefined = sem foto.
+  function renderAvatar(el, name, fotoId) {
+    el.innerHTML = "";
+    el.textContent = "";
+    if (fotoId && seedHttpUrl) {
+      const img = document.createElement("img");
+      img.className = "avatar-foto";
+      img.src = `${seedHttpUrl}/api/profile/foto/${fotoId}`;
+      img.alt = name || "";
+      img.onerror = () => { el.innerHTML = ""; el.textContent = avatarInitial(name); };
+      el.appendChild(img);
+    } else {
+      el.textContent = avatarInitial(name);
+    }
+  }
+
+  function myFotoId() {
+    return localStorage.getItem(STORAGE_FOTO_ID);
+  }
+
   function syncProfileModeBadge() {
     // O modo ON/OFF é um estado só local (localStorage), nunca anunciado
     // pra outros nós - não tem como saber de verdade se OUTRA pessoa está
@@ -1706,13 +1732,18 @@
   async function openProfile(target) {
     profileTarget = target || null;
     const displayName = profileTarget ? profileTarget.name : (myName() || "Alguém");
-    profileAvatarBig.textContent = avatarInitial(displayName);
     profileNameEl.textContent = displayName;
     aboutName.textContent = displayName;
     if (profileTarget) {
+      // Foto de perfil por conta (item 6) só existe pra MIM mesmo hoje -
+      // não tem como saber a conta/e-mail de outra pessoa só pelo
+      // NODE_ID dela (são coisas separadas de propósito). Mantém a
+      // inicial pra perfil de terceiros, sem inventar dado que não existe.
+      profileAvatarBig.textContent = avatarInitial(displayName);
       aboutNodeId.textContent = profileTarget.id || "—";
     } else {
       await ensureMyIdentity();
+      renderAvatar(profileAvatarBig, displayName, myFotoId());
       aboutNodeId.textContent = myNodeId || "—";
     }
     syncProfileModeBadge();
@@ -1727,10 +1758,72 @@
   }
 
   btnAvatar.addEventListener("click", () => {
-    btnAvatar.textContent = avatarInitial(myName());
     openProfile(null);
   });
   profileBack.addEventListener("click", closeProfile);
+
+  // ---------- editar foto/nome do perfil (checklist 2026-09-07, item 6) ----------
+  // Só faz sentido no PRÓPRIO perfil (profileTarget null) - não dá pra
+  // editar a foto/nome de outra pessoa, óbvio, mas o clique só faz
+  // alguma coisa nesse caso (em perfil de terceiro, é só um avatar
+  // normal, sem affordance nenhuma de edição).
+  profileAvatarBig.addEventListener("click", () => {
+    if (profileTarget) return;
+    profileFotoInput.click();
+  });
+
+  profileFotoInput.addEventListener("change", async () => {
+    const file = profileFotoInput.files[0];
+    profileFotoInput.value = "";
+    if (!file) return;
+    const token = await ensureWalletToken();
+    if (!token) return;
+    const form = new FormData();
+    form.append("token", token);
+    form.append("foto", file);
+    try {
+      const res = await fetch(`${seedHttpUrl}/api/profile/foto`, { method: "POST", body: form });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(data.error || "não deu pra trocar a foto");
+        return;
+      }
+      localStorage.setItem(STORAGE_FOTO_ID, data.foto_id);
+      renderAvatar(profileAvatarBig, myName(), data.foto_id);
+      renderAvatar(btnAvatar, myName(), data.foto_id);
+    } catch (e) {
+      alert("erro ao trocar a foto: " + (e && e.message ? e.message : e));
+    }
+  });
+
+  // Nome também vinculado à conta agora - clicar no nome (só o SEU
+  // próprio) deixa trocar, refletindo pra qualquer aparelho que logar
+  // nessa mesma conta depois.
+  profileNameEl.addEventListener("click", async () => {
+    if (profileTarget) return;
+    const novoNome = prompt("Novo nome:", myName() || "");
+    if (!novoNome || !novoNome.trim()) return;
+    const token = await ensureWalletToken();
+    if (!token) return;
+    try {
+      const res = await fetch(`${seedHttpUrl}/api/profile/update_name`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, name: novoNome.trim() }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert(data.error || "não deu pra trocar o nome");
+        return;
+      }
+      localStorage.setItem(STORAGE_NAME, data.name);
+      profileNameEl.textContent = data.name;
+      aboutName.textContent = data.name;
+      renderAvatar(btnAvatar, data.name, myFotoId());
+    } catch (e) {
+      alert("erro ao trocar o nome: " + (e && e.message ? e.message : e));
+    }
+  });
   profileTabs.forEach((btn) => btn.addEventListener("click", () => switchProfileTab(btn.dataset.tab)));
   mediaViewerClose.addEventListener("click", closeMediaViewer);
   mediaViewer.addEventListener("click", (e) => { if (e.target === mediaViewer) closeMediaViewer(); });
@@ -1895,7 +1988,11 @@
   function showChat() {
     nameScreen.classList.add("hidden");
     chatScreen.classList.remove("hidden");
-    btnAvatar.textContent = avatarInitial();
+    btnAvatar.textContent = avatarInitial(myName());
+    // Foto de perfil (checklist 2026-09-07 item 6) - fallback imediato
+    // pra inicial (acima), atualiza pra foto de verdade assim que a
+    // identidade/seedHttpUrl estiver pronta (não bloqueia a tela).
+    ensureMyIdentity().then(() => renderAvatar(btnAvatar, myName(), myFotoId()));
     loadHistory();
     loadGroups();
     connectSocket();
@@ -1981,9 +2078,15 @@
         loginError.classList.remove("hidden");
         return;
       }
+      // Checklist 2026-09-07 (item 6) - nome/foto agora vêm da CONTA, não
+      // do aparelho. Login/cadastro sempre devolvem o nome/foto atuais
+      // de verdade (mesmo se essa conta já tiver logado em outro
+      // celular antes e trocado o nome/foto por lá).
       localStorage.setItem(STORAGE_NAME, data.name);
       localStorage.setItem(STORAGE_LOGGED_IN, "1");
       if (data.token) localStorage.setItem(STORAGE_WALLET_TOKEN, data.token);
+      if (data.foto_id) localStorage.setItem(STORAGE_FOTO_ID, data.foto_id);
+      else localStorage.removeItem(STORAGE_FOTO_ID);
       showChat();
     } catch (e) {
       loginError.textContent = "Precisa de internet pra entrar (ou criar conta) pela primeira vez.";
