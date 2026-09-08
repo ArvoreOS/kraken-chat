@@ -116,6 +116,41 @@ JANUS_HTTP_URL = os.environ.get("KRAKEN_JANUS_HTTP_URL", "http://136.248.100.20:
 # (é sempre localhost, "ele mesmo").
 OCEANO_LIVRE_URL = os.environ.get("KRAKEN_OCEANO_LIVRE_URL", "http://localhost:5301")
 
+# ✅ RESTAURADO (2026-09-07) - achado real fazendo uma avaliação de
+# segurança pedida pelo Gilcimar: essa proteção tinha sido criada em
+# 19/08/2026 (rotas de escrita do nó-semente completamente sem
+# autenticação, expostas na internet pública - qualquer bot podia mandar
+# mensagem se passando por qualquer remetente, ou subir arquivo de
+# qualquer tamanho) mas **sumiu do código em algum ponto entre 19/08 e
+# hoje** sem ninguém perceber (já tinha um alerta parecido registrado em
+# 27/08: "a divergência do KRAKEN_API_KEY nas rotas ainda não foi trazida
+# de volta pro repositório" - ficou pendente e a peça acabou se perdendo
+# de vez). Confirmado ao vivo, com um teste mínimo e claramente marcado
+# (removido do banco na hora): dava pra postar mensagem forjada na
+# conversa real da família sem nenhuma credencial.
+#
+# Mesmo desenho de antes: vazio por padrão (Android/PC locais continuam
+# exatamente como sempre foram, sem essa checagem nunca existir pra
+# eles - só o nó-semente de internet define essa variável de verdade).
+# A chave viaja embutida na própria página (`<meta name="kraken-key">`,
+# ver rota "/") e o app.js manda ela no header X-Kraken-Key nas rotas de
+# escrita - cobre quem abre http://<ip>:7000/ direto no navegador sem
+# instalar o app (uso híbrido já suportado) sem quebrar esse fluxo.
+KRAKEN_API_KEY = os.environ.get("KRAKEN_API_KEY", "")
+
+
+def _checar_api_key():
+    """Chamado no início de toda rota de escrita alcançável de fora
+    (mensagem/arquivo/presente). Sem custo nenhum quando KRAKEN_API_KEY
+    está vazia (Android/PC locais) - só vira checagem de verdade no
+    nó-semente, onde a env var é definida."""
+    if not KRAKEN_API_KEY:
+        return None
+    if request.headers.get("X-Kraken-Key") != KRAKEN_API_KEY:
+        return jsonify({"ok": False, "error": "chave de API ausente ou incorreta"}), 401
+    return None
+
+
 try:
     # No Termux/desktop, BASE_DIR/data é sempre gravável. No Android/Chaquopy,
     # a pasta do código-fonte extraído pode não ser gravável — nesse caso o
@@ -1071,7 +1106,18 @@ mesh = MeshNode(NODE_ID, lambda msg: broadcast_new_message(_try_decrypt_message(
 
 @app.route("/")
 def index():
-    return send_from_directory(app.template_folder, "index.html")
+    # A chave viaja embutida na própria página (não em cookie/sessão) -
+    # cobre também quem abre http://<ip>:7000/ direto no navegador sem
+    # instalar o app (uso híbrido já suportado pelo /join). Vazio quando
+    # KRAKEN_API_KEY não está definida (Android/PC locais) - a tag fica
+    # com content="" e o app.js simplesmente não manda o header, sem
+    # diferença nenhuma de antes pra eles.
+    html = (Path(app.template_folder) / "index.html").read_text(encoding="utf-8")
+    html = html.replace(
+        '<meta name="kraken-key" content="">',
+        f'<meta name="kraken-key" content="{KRAKEN_API_KEY}">',
+    )
+    return Response(html, mimetype="text/html")
 
 
 @app.route("/manifest.json")
@@ -1340,6 +1386,9 @@ def api_wallet_gift_info(gift_id):
 # usaram, sem inventar mecanismo novo.
 @app.route("/api/send_gift_message", methods=["POST"])
 def api_send_gift_message():
+    erro = _checar_api_key()
+    if erro:
+        return erro
     data = request.get_json(force=True) or {}
     gift_id = data.get("gift_id")
     valor = data.get("valor")
@@ -1719,6 +1768,9 @@ def api_live_who_is_live():
 
 @app.route("/api/send", methods=["POST"])
 def api_send():
+    erro = _checar_api_key()
+    if erro:
+        return erro
     data = request.get_json(force=True)
     msg = {
         "id": uuid.uuid4().hex,
@@ -1740,6 +1792,9 @@ def api_send():
 
 @app.route("/api/send_direct", methods=["POST"])
 def api_send_direct():
+    erro = _checar_api_key()
+    if erro:
+        return erro
     data = request.get_json(force=True)
     recipient_id = data.get("recipient_id")
     text = (data.get("text") or "").strip()[:4000]
@@ -1770,6 +1825,9 @@ def api_send_direct():
 
 @app.route("/api/send_group", methods=["POST"])
 def api_send_group():
+    erro = _checar_api_key()
+    if erro:
+        return erro
     data = request.get_json(force=True)
     group_id = data.get("group_id")
     text = (data.get("text") or "").strip()[:4000]
@@ -1859,6 +1917,9 @@ def api_groups_join():
 
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
+    erro = _checar_api_key()
+    if erro:
+        return erro
     f = request.files.get("file")
     if not f or not f.filename:
         return jsonify({"ok": False, "error": "nenhum arquivo"}), 400

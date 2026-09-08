@@ -1,4 +1,16 @@
 (function () {
+  // ✅ RESTAURADO (2026-09-07) - chave de API pras rotas de escrita
+  // (/api/send*, /api/upload, /api/send_gift_message), achado que tinha
+  // sumido do código numa avaliação de segurança pedida pelo Gilcimar
+  // (confirmado ao vivo: dava pra postar mensagem forjada sem
+  // credencial nenhuma). Vem embutida na própria página pela rota "/" -
+  // vazia em Android/PC locais (nunca tiveram essa checagem), só tem
+  // valor de verdade quando servida pelo nó-semente de internet.
+  const KRAKEN_KEY = (document.querySelector('meta[name="kraken-key"]') || {}).content || "";
+  function krakenKeyHeaders() {
+    return KRAKEN_KEY ? { "X-Kraken-Key": KRAKEN_KEY } : {};
+  }
+
   // Captura de erro do próprio motor (2026-09-07, pedido do Gilcimar: "não
   // tem como criar debug pra mostrar o que está com erro?"). Guarda em
   // localStorage (sobrevive a reload/crash) pra aparecer na página 🩺
@@ -1237,7 +1249,7 @@
       }
       const res2 = await fetch("/api/send_gift_message", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...krakenKeyHeaders() },
         body: JSON.stringify(body2),
       });
       const data2 = await res2.json();
@@ -2045,7 +2057,7 @@
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...krakenKeyHeaders() },
         body: JSON.stringify(body),
       });
       const data = await res.json();
@@ -2084,7 +2096,7 @@
     // por cima do texto sem relação nenhuma com o upload em si. Isso fazia
     // parecer que "ficou enviando e não foi" sem nunca mostrar o erro real.
     try {
-      const res = await fetch("/api/upload", { method: "POST", body: form });
+      const res = await fetch("/api/upload", { method: "POST", headers: krakenKeyHeaders(), body: form });
       const data = await res.json();
       if (data.ok) addMessage(data.message);
       else alert(data.error || "erro ao enviar");
