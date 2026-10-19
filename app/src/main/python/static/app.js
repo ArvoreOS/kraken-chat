@@ -75,6 +75,19 @@
   const loginToggleMode = document.getElementById("login-toggle-mode");
   const loginForgotPassword = document.getElementById("login-forgot-password");
   const loginTagline = document.getElementById("login-tagline");
+  const loginBack = document.getElementById("login-back");
+  const twofaForm = document.getElementById("twofa-form");
+  const twofaCode = document.getElementById("twofa-code");
+  const twofaError = document.getElementById("twofa-error");
+  const twofaSubmit = document.getElementById("twofa-submit");
+  const recoverForm = document.getElementById("recover-form");
+  const recoverEmail = document.getElementById("recover-email");
+  const recoverSend = document.getElementById("recover-send");
+  const recoverSent = document.getElementById("recover-sent");
+  const recoverCode = document.getElementById("recover-code");
+  const recoverNew = document.getElementById("recover-new");
+  const recoverError = document.getElementById("recover-error");
+  const recoverSubmit = document.getElementById("recover-submit");
   const messagesEl = document.getElementById("messages");
   const sendForm = document.getElementById("send-form");
   const textInput = document.getElementById("text-input");
@@ -2174,10 +2187,33 @@
   // logar uma vez, o nome fica salvo local e o app volta a funcionar
   // 100% offline como sempre funcionou (ver "inicialização" no fim do
   // arquivo: só mostra essa tela se ainda não tiver nome salvo).
-  let loginMode = "login"; // "login" | "register"
+  let loginMode = "login"; // "login" | "register" | "twofa" | "recover"
+  let twofaEmail = "";
 
   function setLoginMode(mode) {
     loginMode = mode;
+    // v61: código do 2FA e recuperação de senha são telas (forms) fixas, não prompt()
+    const painel = mode === "twofa" || mode === "recover";
+    loginForm.classList.toggle("hidden", painel);
+    twofaForm.classList.toggle("hidden", mode !== "twofa");
+    recoverForm.classList.toggle("hidden", mode !== "recover");
+    loginToggleMode.classList.toggle("hidden", painel);
+    loginBack.classList.toggle("hidden", !painel);
+    if (mode === "twofa") {
+      loginTagline.textContent = "Confirme que é você";
+      loginForgotPassword.classList.add("hidden");
+      twofaError.classList.add("hidden");
+      twofaCode.value = "";
+      setTimeout(() => twofaCode.focus(), 50);
+      return;
+    }
+    if (mode === "recover") {
+      loginTagline.textContent = "Recuperar senha";
+      loginForgotPassword.classList.add("hidden");
+      recoverError.classList.add("hidden");
+      if (!recoverEmail.value) recoverEmail.value = loginEmail.value.trim();
+      return;
+    }
     if (mode === "register") {
       loginName.classList.remove("hidden");
       loginPassword.setAttribute("autocomplete", "new-password");
@@ -2240,30 +2276,13 @@
       // código foi mandado. Pede o código e troca pela resposta de
       // verdade (token/nome/foto) antes de seguir com o fluxo normal.
       if (data.precisa_2fa) {
-        const codigo = prompt("Mandamos um código de 6 dígitos pro seu e-mail. Digite ele aqui:");
-        if (!codigo) return;
-        const res2 = await fetch(`${seedHttpUrl}/api/auth/verify_2fa`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, codigo }),
-        });
-        data = await res2.json();
-        if (!res2.ok || !data.ok) {
-          loginError.textContent = data.error || "Código incorreto.";
-          loginError.classList.remove("hidden");
-          return;
-        }
+        // v61: o código vai num campo fixo da tela (antes era prompt(), que
+        // sumia quando a pessoa saía da janela pra abrir o e-mail)
+        twofaEmail = email;
+        setLoginMode("twofa");
+        return;
       }
-      // Checklist 2026-09-07 (item 6) - nome/foto agora vêm da CONTA, não
-      // do aparelho. Login/cadastro sempre devolvem o nome/foto atuais
-      // de verdade (mesmo se essa conta já tiver logado em outro
-      // celular antes e trocado o nome/foto por lá).
-      localStorage.setItem(STORAGE_NAME, data.name);
-      localStorage.setItem(STORAGE_LOGGED_IN, "1");
-      if (data.token) localStorage.setItem(STORAGE_WALLET_TOKEN, data.token);
-      if (data.foto_id) localStorage.setItem(STORAGE_FOTO_ID, data.foto_id);
-      else localStorage.removeItem(STORAGE_FOTO_ID);
-      showChat();
+      concluirLogin(data);
     } catch (e) {
       loginError.textContent = "Precisa de internet pra entrar (ou criar conta) pela primeira vez.";
       loginError.classList.remove("hidden");
@@ -2273,56 +2292,110 @@
     }
   });
 
-  // ---------- esqueci minha senha (achado real do Gilcimar, 2026-09-07) ----------
-  // Mesmo padrão de diálogo simples (prompt/alert) já usado no código de
-  // 2FA acima, em vez de construir uma tela nova - a MainActivity já
-  // implementa onJsPrompt/onJsAlert (corrigido nesta mesma sessão), então
-  // esses diálogos aparecem de verdade no app Android.
-  loginForgotPassword.addEventListener("click", async () => {
-    const email = (prompt("Qual o e-mail da sua conta?", loginEmail.value.trim()) || "").trim();
-    if (!email) return;
+  // Login/cadastro/2FA/troca de senha terminam igual. Checklist 2026-09-07
+  // (item 6) - nome/foto vêm da CONTA, não do aparelho.
+  function concluirLogin(data) {
+    localStorage.setItem(STORAGE_NAME, data.name);
+    localStorage.setItem(STORAGE_LOGGED_IN, "1");
+    if (data.token) localStorage.setItem(STORAGE_WALLET_TOKEN, data.token);
+    if (data.foto_id) localStorage.setItem(STORAGE_FOTO_ID, data.foto_id);
+    else localStorage.removeItem(STORAGE_FOTO_ID);
+    setLoginMode("login");
+    showChat();
+  }
+
+  async function garantirSeed() {
+    if (seedHttpUrl) return seedHttpUrl;
+    const peersRes = await fetch("/api/peers");
+    const peersData = await peersRes.json();
+    seedHttpUrl = peersData.seed_http;
+    myNodeId = peersData.node_id;
+    return seedHttpUrl;
+  }
+
+  function mostrarErro(el, texto) {
+    el.textContent = texto;
+    el.classList.remove("hidden");
+  }
+
+  loginBack.addEventListener("click", () => setLoginMode("login"));
+
+  // ---------- 2FA: código por e-mail (campo fixo) ----------
+  twofaForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    twofaError.classList.add("hidden");
+    const codigo = twofaCode.value.replace(/\D/g, "");
+    if (codigo.length !== 6) return mostrarErro(twofaError, "O código tem 6 números.");
+    twofaSubmit.disabled = true;
     try {
-      const peersRes = await fetch("/api/peers");
-      const peersData = await peersRes.json();
-      seedHttpUrl = peersData.seed_http;
-      await fetch(`${seedHttpUrl}/api/auth/forgot_password`, {
+      const res = await fetch(`${await garantirSeed()}/api/auth/verify_2fa`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: twofaEmail, codigo }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) return mostrarErro(twofaError, data.error || "Código incorreto.");
+      concluirLogin(data);
+    } catch (err) {
+      mostrarErro(twofaError, "Sem conexão. Tenta de novo.");
+    } finally {
+      twofaSubmit.disabled = false;
+    }
+  });
+
+  // ---------- esqueci minha senha (achado real do Gilcimar, 2026-09-07) ----------
+  // v61 (2026-10-18): tela fixa com e-mail, "Enviar código", código e senha nova.
+  // Os campos do código ficam sempre visíveis - quem já recebeu um código
+  // (ou bateu no limite de pedidos) consegue usar o código que já tem.
+  loginForgotPassword.addEventListener("click", () => setLoginMode("recover"));
+
+  recoverSend.addEventListener("click", async () => {
+    recoverError.classList.add("hidden");
+    const email = recoverEmail.value.trim();
+    if (!email) return mostrarErro(recoverError, "Escreve o e-mail da conta.");
+    recoverSend.disabled = true;
+    try {
+      await fetch(`${await garantirSeed()}/api/auth/forgot_password`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email }),
       });
-    } catch (e) {
-      alert("Precisa de internet pra recuperar a senha.");
-      return;
+      recoverSent.innerHTML = "Pronto! Se esse e-mail tiver conta, o código chega em instantes (vale 30 min). " +
+        "Não chegou? Olhe o <b>Spam</b>. São no máximo 3 pedidos por hora.";
+      recoverSent.classList.remove("hidden");
+      recoverCode.focus();
+    } catch (err) {
+      mostrarErro(recoverError, "Precisa de internet pra recuperar a senha.");
+    } finally {
+      setTimeout(() => { recoverSend.disabled = false; }, 15000);   // evita apertar várias vezes seguidas
     }
-    alert("Se esse e-mail tiver conta, mandamos um código de recuperação pra ele. Confira sua caixa de entrada.");
+  });
 
-    const codigo = (prompt("Digite o código de 6 dígitos que chegou no seu e-mail:") || "").trim();
-    if (!codigo) return;
-    const novaSenha = prompt("Digite sua NOVA senha (mínimo 6 caracteres):");
-    if (!novaSenha) return;
-
+  recoverForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    recoverError.classList.add("hidden");
+    const email = recoverEmail.value.trim();
+    const codigo = recoverCode.value.replace(/\D/g, "");
+    const novaSenha = recoverNew.value;
+    if (!email) return mostrarErro(recoverError, "Escreve o e-mail da conta.");
+    if (codigo.length !== 6) return mostrarErro(recoverError, "O código tem 6 números.");
+    if (novaSenha.length < 6) return mostrarErro(recoverError, "A senha nova precisa de pelo menos 6 caracteres.");
+    recoverSubmit.disabled = true;
     try {
-      const res = await fetch(`${seedHttpUrl}/api/auth/reset_password`, {
+      const res = await fetch(`${await garantirSeed()}/api/auth/reset_password`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, codigo, nova_senha: novaSenha }),
       });
       const data = await res.json();
-      if (!res.ok || !data.ok) {
-        alert(data.error || "não deu pra trocar a senha - tenta de novo");
-        return;
-      }
-      // Mesma lógica de sucesso do login normal - a troca de senha já
-      // devolve um token novo, entra direto sem pedir a senha de novo.
-      localStorage.setItem(STORAGE_NAME, data.name);
-      localStorage.setItem(STORAGE_LOGGED_IN, "1");
-      if (data.token) localStorage.setItem(STORAGE_WALLET_TOKEN, data.token);
-      if (data.foto_id) localStorage.setItem(STORAGE_FOTO_ID, data.foto_id);
-      else localStorage.removeItem(STORAGE_FOTO_ID);
-      alert("Senha trocada! Você já está logado.");
-      showChat();
-    } catch (e) {
-      alert("Precisa de internet pra trocar a senha.");
+      if (!res.ok || !data.ok) return mostrarErro(recoverError, data.error || "Não deu pra trocar a senha - tenta de novo.");
+      // A troca de senha já devolve um token novo: entra direto.
+      recoverCode.value = ""; recoverNew.value = "";
+      concluirLogin(data);
+    } catch (err) {
+      mostrarErro(recoverError, "Precisa de internet pra trocar a senha.");
+    } finally {
+      recoverSubmit.disabled = false;
     }
   });
 

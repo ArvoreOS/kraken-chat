@@ -85,6 +85,15 @@ body {
   color: #04170a;
   box-shadow: 0 12px 26px -8px rgba(0,166,81,.55);
 }
+.login-btn:disabled { opacity: .6; cursor: default; }
+.login-btn-sec {
+  background: transparent;
+  color: #c9a3f7;
+  border: 2px solid #c9a3f7;
+  box-shadow: none;
+}
+.login-info { color: #b8adcf; font-size: 13.5px; line-height: 1.5; margin: 0; text-align: left; }
+.login-info b { color: #f4f0ff; }
 .login-toggle {
   display: block;
   margin: 18px auto 0;

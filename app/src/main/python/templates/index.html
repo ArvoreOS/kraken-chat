@@ -38,11 +38,34 @@
       <button type="submit" id="login-submit" class="login-btn">Entrar</button>
     </form>
 
+    <!-- v61 (2026-10-18, achado real do Gilcimar): código do 2FA e da
+         recuperação de senha eram pedidos em prompt() do navegador, que
+         some sozinho quando a pessoa sai da janela pra abrir o e-mail.
+         Agora são campos fixos na tela: ficam ali até terminar. -->
+    <form id="twofa-form" class="login-form hidden">
+      <p class="login-info">Mandamos um código de 6 dígitos pro seu e-mail. Pode abrir o e-mail e voltar — esta tela espera.</p>
+      <input type="text" id="twofa-code" inputmode="numeric" maxlength="6" placeholder="Código de 6 dígitos" autocomplete="one-time-code">
+      <p class="login-error hidden" id="twofa-error"></p>
+      <button type="submit" id="twofa-submit" class="login-btn">Confirmar código</button>
+    </form>
+
+    <form id="recover-form" class="login-form hidden">
+      <p class="login-info">1. Confirme o e-mail da conta e toque em <b>Enviar código</b>.<br>2. Abra o e-mail (olhe também o Spam), volte aqui e preencha o código e a senha nova.</p>
+      <input type="email" id="recover-email" placeholder="E-mail da conta" autocomplete="email">
+      <button type="button" id="recover-send" class="login-btn login-btn-sec">Enviar código</button>
+      <p class="login-info hidden" id="recover-sent"></p>
+      <input type="text" id="recover-code" inputmode="numeric" maxlength="6" placeholder="Código de 6 dígitos" autocomplete="one-time-code">
+      <input type="password" id="recover-new" placeholder="Senha nova (mínimo 6)" autocomplete="new-password">
+      <p class="login-error hidden" id="recover-error"></p>
+      <button type="submit" id="recover-submit" class="login-btn">Trocar senha e entrar</button>
+    </form>
+
     <!-- Achado real do Gilcimar (2026-09-07): não existia jeito nenhum de
          recuperar a senha esquecida. Só aparece no modo "login" (esquecer
          senha de uma conta que ainda nem existe não faz sentido). -->
     <button type="button" id="login-forgot-password" class="login-toggle">Esqueci minha senha</button>
     <button type="button" id="login-toggle-mode" class="login-toggle">Não tem conta? Criar agora</button>
+    <button type="button" id="login-back" class="login-toggle hidden">‹ Voltar para o login</button>
   </div>
 </div>
 
